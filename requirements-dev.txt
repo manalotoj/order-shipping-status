@@ -1,0 +1,8 @@
+-r requirements.txt
+pytest>=8.0
+pytest-cov>=5.0
+freezegun>=1.5        # time-freezing for deterministic tests
+responses>=0.25       # HTTP mocking if you keep hitting FedEx in tests
+ruff>=0.6             # fast linter/formatter (replaces flake8 + isort)
+mypy>=1.11            # optional static typing
+types-requests>=2.32  # typing stubs
