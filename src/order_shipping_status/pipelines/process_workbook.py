@@ -1,4 +1,3 @@
-# src/order_shipping_status/pipeline.py
 from __future__ import annotations
 
 from pathlib import Path

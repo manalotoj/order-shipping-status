@@ -1,3 +1,4 @@
+# src/order_shipping_status/cli.py
 from __future__ import annotations
 
 import argparse
@@ -7,6 +8,7 @@ from pathlib import Path
 from .config.logging_config import get_logger
 from .io.paths import derive_output_paths
 from .config.env import get_app_env
+from .pipelines.process_workbook import process_workbook   # <- add this import
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,8 +60,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Environment error: %s", e)
         return 2
 
-    # (future) call the real pipeline with args.input, processed_path, env_cfg, logger
-    logger.info("Dry run complete (pipeline not yet wired).")
+    # Call the stub pipeline façade
+    try:
+        process_workbook(args.input, processed_path, logger, env_cfg)
+    except FileNotFoundError as e:
+        logger.error("Input missing: %s", e)
+        return 2
+    except Exception as e:
+        logger.exception("Failed to process workbook: %s", e)
+        return 1
+
+    logger.info("Done.")
     return 0
 
 

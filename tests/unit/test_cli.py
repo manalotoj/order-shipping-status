@@ -13,6 +13,7 @@ def run_cli(args):
 
 
 def test_cli_happy_path(tmp_path: Path, monkeypatch):
+    print("tmp_path:", tmp_path)
     # create fake input xlsx
     src = tmp_path / "abc.xlsx"
     src.write_text("x")
