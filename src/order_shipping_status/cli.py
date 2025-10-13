@@ -8,8 +8,7 @@ from pathlib import Path
 from .config.logging_config import get_logger
 from .io.paths import derive_output_paths
 from .config.env import get_app_env
-from .pipelines.process_workbook import process_workbook
-from .api.client import ReplayClient, normalize_status
+from .pipelines.workbook_processor import WorkbookProcessor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,13 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory containing <Tracking Number>.json bodies for deterministic replays.",
     )
+    p.add_argument(
+        "--use-api",
+        action="store_true",
+        help="Use live FedEx API (requires credentials in env). Ignored if --replay-dir is set.",
+    )
+    p.add_argument(
+        "--reference-date",
+        type=str,
+        default=None,
+        help="YYYY-MM-DD anchor date for the prior-week filter (Sunday..Saturday).",
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    # Resolve derived paths
+    # Resolve derived paths (also validates input exists)
     try:
         processed_path, log_path = derive_output_paths(args.input)
     except FileNotFoundError:
@@ -76,24 +86,59 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Environment error: %s", e)
         return 2
 
-    # Optional replay client
+    # Decide enrichment strategy
     client = None
     normalizer = None
+
     if args.replay_dir:
+        # Lazy imports to keep startup light
+        from .api.client import ReplayClient
+        from .api.normalize import normalize_fedex
+
         client = ReplayClient(args.replay_dir)
-        normalizer = normalize_status
+        normalizer = normalize_fedex
         logger.info("Replay mode enabled: %s", args.replay_dir)
 
-    # Call the pipeline façade
+    elif args.use_api:
+        from .api.fedex import FedExClient, FedExAuth, FedExConfig
+        from .api.transport import RequestsTransport
+        from .api.normalize import normalize_fedex
+
+        token_url = getattr(env_cfg, "FEDEX_TOKEN_URL",
+                            None) or "https://apis.fedex.com/oauth/token"
+        base_url = getattr(env_cfg, "FEDEX_BASE_URL",
+                           None) or "https://apis.fedex.com/track"
+
+        auth = FedExAuth(
+            client_id=getattr(env_cfg, "SHIPPING_CLIENT_ID", ""),
+            client_secret=getattr(env_cfg, "SHIPPING_CLIENT_SECRET", ""),
+            token_url=token_url,
+        )
+        cfg = FedExConfig(base_url=base_url)
+        client = FedExClient(auth, cfg, transport=RequestsTransport())
+        normalizer = normalize_fedex
+        logger.info("Live FedEx API enabled (base=%s)", base_url)
+
+    # Reference date (optional)
+    reference_date = None
+    if args.reference_date:
+        from datetime import date
+        try:
+            reference_date = date.fromisoformat(args.reference_date)
+        except ValueError:
+            logger.error(
+                "Invalid --reference-date: %s (expected YYYY-MM-DD)", args.reference_date)
+            return 2
+
+    # Orchestrate via WorkbookProcessor
     try:
-        process_workbook(
-            args.input,
-            processed_path,
+        processor = WorkbookProcessor(
             logger,
-            env_cfg,
             client=client,
             normalizer=normalizer,
+            reference_date=reference_date,
         )
+        processor.process(args.input, processed_path, env_cfg)
     except FileNotFoundError as e:
         logger.error("Input missing: %s", e)
         return 2
@@ -103,61 +148,6 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Done.")
     return 0
-
-
-def test_replay_enrichment_populates_fedex_columns(tmp_path):
-    import json
-    from types import SimpleNamespace
-    import pandas as pd
-    from order_shipping_status.pipelines.process_workbook import process_workbook
-    from order_shipping_status.api.client import ReplayClient, normalize_status
-    from order_shipping_status.io.schema import OUTPUT_FEDEX_COLUMNS
-
-    # --- Arrange: replay body for a tracking number ---
-    tracking = "123456789012"
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    (replay_dir / f"{tracking}.json").write_text(json.dumps({
-        "code": "DLV",
-        "statusByLocale": "Delivered",
-        "description": "Left at front door",
-    }), encoding="utf-8")
-
-    # --- Arrange: input workbook with that tracking number ---
-    src = tmp_path / "in.xlsx"
-    pd.DataFrame([{
-        "A": 1,
-        "Tracking Number": tracking,
-        "Carrier Code": "FDX",
-    }]).to_excel(src, index=False)
-    out = tmp_path / "in_processed.xlsx"
-
-    # --- Arrange: quiet logger + env ---
-    class Logger:
-        def debug(self, *a, **k): pass
-        def info(self, *a, **k): pass
-        def warning(self, *a, **k): pass
-        def error(self, *a, **k): pass
-    env = SimpleNamespace(SHIPPING_CLIENT_ID="", SHIPPING_CLIENT_SECRET="")
-
-    # --- Act: run with ReplayClient + normalizer ---
-    process_workbook(
-        src, out, Logger(), env,
-        client=ReplayClient(replay_dir),
-        normalizer=normalize_status,
-    )
-
-    # --- Assert: processed sheet has populated FedEx columns for that row ---
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    assert df.iloc[0]["code"] == "DLV"
-    # mirrors code in current normalizer
-    assert df.iloc[0]["derivedCode"] == "DLV"
-    assert df.iloc[0]["statusByLocale"] == "Delivered"
-    assert df.iloc[0]["description"] == "Left at front door"
-
-    # And: all expected FedEx columns exist
-    for col in OUTPUT_FEDEX_COLUMNS:
-        assert col in df.columns
 
 
 if __name__ == "__main__":  # pragma: no cover

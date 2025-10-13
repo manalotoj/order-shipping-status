@@ -11,22 +11,22 @@ def run_cli(args):
 
 
 def test_cli_creates_processed_with_expected_columns(tmp_path: Path):
-    # Minimal real input workbook with a couple of columns
     src = tmp_path / "abc.xlsx"
-    df = pd.DataFrame([{"A": 1, "B": 2}])
-    df.to_excel(src, index=False)
+    # Include a disposable first column so the preprocessor can drop it
+    pd.DataFrame([{"X": "drop", "A": 1, "B": 2}]).to_excel(src, index=False)
 
-    # Run CLI quietly
     code = run_cli([str(src), "--no-console", "--log-level=DEBUG"])
     assert code == 0
 
     processed, _log = derive_output_paths(src)
     assert processed.exists()
 
-    # Re-open produced workbook and assert columns on the "Processed" sheet
     out = pd.read_excel(processed, sheet_name="Processed", engine="openpyxl")
 
-    # original columns preserved
+    # first column was dropped
+    assert "X" not in out.columns
+
+    # original (non-first) columns preserved
     for col in ["A", "B"]:
         assert col in out.columns
 
