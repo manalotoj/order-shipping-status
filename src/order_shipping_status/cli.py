@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="YYYY-MM-DD anchor date for the prior-week filter (Sunday..Saturday).",
     )
+    p.add_argument(
+        "--skip-date-filter",
+        action="store_true",
+        help="Skip the prior-week Promised Delivery Date filter.",
+    )
     return p
 
 
@@ -137,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             client=client,
             normalizer=normalizer,
             reference_date=reference_date,
+            enable_date_filter=not args.skip_date_filter,
         )
         processor.process(args.input, processed_path, env_cfg)
     except FileNotFoundError as e:

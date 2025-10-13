@@ -9,28 +9,32 @@ from order_shipping_status.io.schema import LEGACY_STATUS_COLUMN
 class Preprocessor:
     """Project’s input normalization and row filtering (prior week; not delivered)."""
 
-    def __init__(self, reference_date: Optional[dt.date] = None, logger=None) -> None:
+    def __init__(
+        self,
+        reference_date: Optional[dt.date] = None,
+        logger=None,
+        *,
+        enable_date_filter: bool = True,   # ← NEW
+    ) -> None:
         self.reference_date = reference_date
         self.logger = logger
+        self.enable_date_filter = enable_date_filter
 
-    # Public helper (useful for tests/CLI)
     def prior_week_range(self, ref: Optional[dt.date] = None) -> Tuple[dt.date, dt.date]:
         if ref is None:
             ref = self.reference_date or dt.date.today()
-        days_since_sun = (ref.weekday() + 1) % 7  # Mon=0..Sun=6
+        days_since_sun = (ref.weekday() + 1) % 7
         this_sun = ref - dt.timedelta(days=days_since_sun)
         prior_sun = this_sun - dt.timedelta(days=7)
         prior_sat = prior_sun + dt.timedelta(days=6)
         return prior_sun, prior_sat
 
-    # Back-compat: keep the old private name
-    def _prior_week_range(self, ref: Optional[dt.date] = None) -> Tuple[dt.date, dt.date]:
-        return self.prior_week_range(ref)
-
     def _drop_first_column(self, df: pd.DataFrame) -> pd.DataFrame:
         return df if df.shape[1] == 0 else df.iloc[:, 1:].copy()
 
     def _filter_by_prior_week(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.enable_date_filter:
+            return df  # ← bypass filtering
         if "Promised Delivery Date" not in df.columns:
             return df
         start, end = self.prior_week_range()
@@ -56,10 +60,13 @@ class Preprocessor:
 
         before = len(df1)
         df2 = self._filter_by_prior_week(df1)
-        self._log_delta("filter_by_prior_week", before, len(df2))
+        self._log_delta(
+            "filter_by_prior_week" +
+            ("" if self.enable_date_filter else " (skipped)"),
+            before, len(df2)
+        )
 
         before = len(df2)
         df3 = self._filter_not_delivered(df2)
         self._log_delta("filter_not_delivered", before, len(df3))
-
         return df3
