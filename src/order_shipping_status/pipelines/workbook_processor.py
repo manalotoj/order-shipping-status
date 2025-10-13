@@ -11,7 +11,7 @@ from order_shipping_status.models import EnvCfg
 from order_shipping_status.pipelines.column_contract import ColumnContract
 from order_shipping_status.pipelines.enricher import Enricher
 from order_shipping_status.pipelines.preprocessor import Preprocessor
-from order_shipping_status.rules.classifier import apply_rules
+from order_shipping_status.rules.indicators import apply_indicators
 
 
 class WorkbookProcessor:
@@ -78,7 +78,7 @@ class WorkbookProcessor:
         ).enrich(df_out, sidecar_dir=sidecar_dir)
 
         # Classification rules
-        df_out = apply_rules(df_out)
+        df_out = apply_indicators(df_out)
 
         # Marker + write
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat()

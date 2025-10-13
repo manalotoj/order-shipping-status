@@ -1,6 +1,8 @@
+# tests/integration/rules/test_cli_pretransit_replay.py
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -10,9 +12,9 @@ from order_shipping_status.pipelines.workbook_processor import WorkbookProcessor
 from order_shipping_status.api.client import ReplayClient
 from order_shipping_status.api.normalize import normalize_fedex
 from order_shipping_status.io.schema import OUTPUT_FEDEX_COLUMNS
+from order_shipping_status.rules.classifier import classify_row_pretransit
 
-
-# ---- Pre-transit tracking numbers provided by you ----
+# Provided pre-transit tracking numbers
 PRETRANSIT_TNS = [
     "393845597098",
     "393793611690",
@@ -32,25 +34,40 @@ PRETRANSIT_TNS = [
 @pytest.fixture(scope="module")
 def raw_capture_path() -> Path:
     """
-    Where to find the combined capture. We try repo path first, then /mnt/data as a convenience.
+    Locate capture file or SKIP (don't fail the suite).
+    Override with env: OSS_FEDEX_CAPTURE=/abs/path/to/RAW_TransitIssues_10-7-2025_api_bodies.json
     """
-    candidates = [
-        Path("tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
-        Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
-    ]
-    for p in candidates:
+    # 1) Env override
+    env_path = os.getenv("OSS_FEDEX_CAPTURE")
+    if env_path:
+        p = Path(env_path)
         if p.exists():
             return p
+
+    # 2) Repo-local candidates
+    repo_candidates = [
+        Path("tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
+        Path(__file__).resolve().parent.parent.parent
+        / "data"
+        / "RAW_TransitIssues_10-7-2025_api_bodies.json",
+    ]
+
+    # 3) External mount (when available)
+    external_candidates = [
+        Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
+    ]
+
+    for p in repo_candidates + external_candidates:
+        if p.exists():
+            return p
+
     pytest.skip(
-        "FedEx capture JSON not found. Place it at tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"
+        "FedEx capture JSON not found. Set OSS_FEDEX_CAPTURE or place the file at tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"
     )
 
 
 def _extract_response_body(env: dict) -> dict:
-    """
-    Return the raw FedEx response body dict that contains `completeTrackResults`,
-    unwrapping common capture envelope keys like 'output', 'body', 'response', or 'data'.
-    """
+    """Unwrap common envelope keys to return the FedEx body that contains completeTrackResults."""
     cand = env
     for key in ("output", "body", "response", "data"):
         if isinstance(cand, dict) and key in cand and isinstance(cand[key], dict):
@@ -60,10 +77,7 @@ def _extract_response_body(env: dict) -> dict:
 
 
 def _map_tracking_to_body(combined_records: list[dict]) -> dict[str, dict]:
-    """
-    Build a dict: tracking_number -> FedEx response body (NOT the outer envelope).
-    Expects the body to have: body["completeTrackResults"][*]["trackingNumber"]
-    """
+    """Build: tracking_number -> unwrapped FedEx response body."""
     mapping: dict[str, dict] = {}
     for env in combined_records:
         try:
@@ -74,45 +88,30 @@ def _map_tracking_to_body(combined_records: list[dict]) -> dict[str, dict]:
             for r in ctr:
                 tn = str(r.get("trackingNumber", "")).strip()
                 if tn:
-                    mapping[tn] = body  # store the unwrapped body
+                    mapping[tn] = body
         except Exception:
-            # Skip malformed records quietly
             continue
     return mapping
 
 
 @pytest.fixture()
-def replay_dir_with_pretransit(tmp_path: Path, raw_capture_path: Path) -> Path:
-    """
-    Creates tmp_path/replay containing <tn>.json for each TN in PRETRANSIT_TNS,
-    writing out the *unwrapped* FedEx body so normalize_fedex can parse it.
-    """
+def replay_dir_with_listed_tns(tmp_path: Path, raw_capture_path: Path) -> tuple[Path, list[str]]:
+    """Write replay files for each TN from the provided list that exists in the capture."""
     data = json.loads(raw_capture_path.read_text(encoding="utf-8"))
-    tn_to_body = _map_tracking_to_body(data)
+    mapping = _map_tracking_to_body(data)
 
-    if not any(tn in tn_to_body for tn in PRETRANSIT_TNS):
+    present = [tn for tn in PRETRANSIT_TNS if tn in mapping]
+    if not present:
         pytest.skip(
-            "None of the listed pre-transit TNs were found in the capture file.")
+            "None of the provided pretransit TNs were present in the capture file.")
 
     replay_dir = tmp_path / "replay"
     replay_dir.mkdir()
+    for tn in present:
+        (replay_dir /
+         f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
 
-    missing = []
-    for tn in PRETRANSIT_TNS:
-        body = tn_to_body.get(tn)
-        if body is None:
-            missing.append(tn)
-            continue
-        (replay_dir / f"{tn}.json").write_text(json.dumps(body),
-                                               encoding="utf-8")
-
-    if missing:
-        print(
-            f"[warn] Missing {len(missing)} pretransit TNs not present in capture: "
-            f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
-        )
-
-    return replay_dir
+    return replay_dir, present
 
 
 class _QuietLogger:
@@ -123,81 +122,68 @@ class _QuietLogger:
 
 
 @pytest.mark.parametrize("batch_size", [3, 6, 12])
-def test_pretransit_rows_classified(tmp_path: Path, replay_dir_with_pretransit: Path, batch_size: int):
+def test_pretransit_rows_classified(tmp_path: Path, replay_dir_with_listed_tns: tuple[Path, list[str]], batch_size: int):
     """
-    Build an input workbook using real capture bodies via ReplayClient.
-    We RELAX date filtering at the processor level (enable_date_filter=False), so dates don't matter here.
-    Then assert CalculatedStatus == 'PreTransit' (rule output).
+    Deterministic integration:
+      - Materialize replays for TNs in the provided list that are present in the capture.
+      - Run processor (date filter disabled).
+      - For each processed row belonging to our subset, assert:
+          IsPreTransit == classify_row_pretransit(code, derivedCode, statusByLocale, description)
     """
-    avail = [
-        tn for tn in PRETRANSIT_TNS
-        if (replay_dir_with_pretransit / f"{tn}.json").exists()
-    ]
-    if not avail:
-        pytest.skip(
-            "No pretransit TN files were materialized in replay_dir; skipping.")
-    subset = avail[:batch_size]
+    replay_dir, present_tns = replay_dir_with_listed_tns
+    subset = present_tns[:max(1, min(batch_size, len(present_tns)))]
 
-    # Build input workbook (include disposable first column 'X' so preprocessor drops it)
+    # Build input workbook (include disposable first column so preprocessor drops it)
     rows = [{
         "X": "drop-me",
-        "Promised Delivery Date": "N/A",  # ignored because we disable the date filter
+        "Promised Delivery Date": "N/A",   # ignored; date filter disabled
         "Delivery Tracking Status": "in transit",
         "Tracking Number": tn,
         "Carrier Code": "FDX",
-        "A": idx + 1,
+        "RowId": idx + 1,
     } for idx, tn in enumerate(subset)]
 
     src = tmp_path / "in.xlsx"
     pd.DataFrame(rows).to_excel(src, index=False)
     out = tmp_path / "in_processed.xlsx"
 
-    # Run the processor with replay client + normalizer, and DISABLE date filter
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir_with_pretransit),
+        client=ReplayClient(replay_dir),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,
     )
     proc.process(src, out, env_cfg=None)
 
-    # Assertions
     df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+
+    # Contract columns present
     for col in OUTPUT_FEDEX_COLUMNS + ["CalculatedStatus"]:
-        assert col in df.columns
+        assert col in df.columns, f"Missing column: {col}"
 
-    # Expect classification result (rules) rather than a specific FedEx code
-    for i in range(len(subset)):
-        assert df.loc[i, "CalculatedStatus"] == "PreTransit"
-        # sanity: enriched columns exist; allow description to be empty
-        assert isinstance(df.loc[i, "statusByLocale"], str)
+    # Indicator columns present
+    for col in ("IsPreTransit", "IsDelivered", "HasException"):
+        assert col in df.columns, f"Missing indicator column: {col}"
 
+    # Index rows by Tracking Number for robust matching
+    df["Tracking Number"] = df["Tracking Number"].astype(str)
+    idx_by_tn = {str(tn): i for i, tn in enumerate(df["Tracking Number"])}
 
-def test_single_pretransit_smoke(tmp_path: Path, replay_dir_with_pretransit: Path):
-    tn = "393845597098"
-    if not (replay_dir_with_pretransit / f"{tn}.json").exists():
-        pytest.skip(
-            f"{tn} not present in replay_dir (capture may not include it).")
+    # For each TN in subset, compute expected via classifier on ENRICHED fields and compare
+    for tn in subset:
+        key = str(tn)
+        assert key in idx_by_tn, f"Expected TN {tn} not found in processed output."
+        i = idx_by_tn[key]
+        code = str(df.loc[i, "code"])
+        derived = str(df.loc[i, "derivedCode"])
+        status = str(df.loc[i, "statusByLocale"])
+        desc = str(df.loc[i, "description"])
 
-    src = tmp_path / "in.xlsx"
-    pd.DataFrame([{
-        "X": "drop",
-        "Promised Delivery Date": "N/A",  # ignored because we disable the date filter
-        "Delivery Tracking Status": "In Transit",
-        "Tracking Number": tn,
-        "Carrier Code": "FDX",
-    }]).to_excel(src, index=False)
-    out = tmp_path / "out.xlsx"
-
-    proc = WorkbookProcessor(
-        logger=_QuietLogger(),
-        client=ReplayClient(replay_dir_with_pretransit),
-        normalizer=normalize_fedex,
-        reference_date=None,
-        enable_date_filter=False,
-    )
-    proc.process(src, out, env_cfg=None)
-
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    assert df.loc[0, "CalculatedStatus"] == "PreTransit"
+        expected = 1 if classify_row_pretransit(
+            code, derived, status, desc) else 0
+        got = int(df.loc[i, "IsPreTransit"])
+        assert got == expected, (
+            f"TN {tn}: IsPreTransit={got}, expected={expected} "
+            f"(code={code!r}, derived={derived!r}, status={status!r}, desc={desc!r})"
+        )

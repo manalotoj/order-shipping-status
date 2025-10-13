@@ -1,11 +1,15 @@
 # src/order_shipping_status/rules/classifier.py
 from __future__ import annotations
-import pandas as pd
+
 from typing import Iterable
+import pandas as pd
 
+# Output statuses we set
 PRETRANSIT = "PreTransit"
+DELIVERED = "Delivered"
+EXCEPTION = "Exception"
 
-# lowercased text hints
+# -------- Text hints (lowercased) --------
 _PRETRANSIT_HINTS: tuple[str, ...] = (
     "label created",
     "shipment information sent",
@@ -17,11 +21,25 @@ _PRETRANSIT_HINTS: tuple[str, ...] = (
 )
 
 _DELIVERED_HINTS: tuple[str, ...] = ("delivered",)
-_EXCEPTION_HINTS: tuple[str, ...] = (
-    "exception", "delivery exception", "address correction", "damage")
 
-# FedEx codes commonly used for pre-transit / label-created states
-_PRETRANSIT_CODES: set[str] = {"OC", "LP"}  # extend later if needed
+_EXCEPTION_HINTS: tuple[str, ...] = (
+    "exception",
+    "delivery exception",
+    "address correction",
+    "damage",
+)
+
+# -------- FedEx (commonly observed) codes --------
+# Pre-transit / label created
+# observed for "label created" / pre-advice
+_PRETRANSIT_CODES: set[str] = {"OC", "LP"}
+
+# Delivered
+# Some captures show "DL", others "DLV" (be permissive to avoid false negatives)
+_DELIVERED_CODES: set[str] = {"DLV", "DL", "DEL"}
+
+# Exception
+_EXCEPTION_CODES: set[str] = {"EXC"}  # grow this list as we see more codes
 
 
 def _any_in(text: str, phrases: Iterable[str]) -> bool:
@@ -29,38 +47,83 @@ def _any_in(text: str, phrases: Iterable[str]) -> bool:
     return any(p in t for p in phrases)
 
 
-def classify_row_pretransit(code: str, derived: str, status_by_locale: str, description: str) -> bool:
-    s = (status_by_locale or "")
-    d = (description or "")
-    if _any_in(s, _DELIVERED_HINTS) or _any_in(d, _DELIVERED_HINTS):
-        return False
-    if _any_in(s, _EXCEPTION_HINTS) or _any_in(d, _EXCEPTION_HINTS):
-        return False
-    # code-based signal first
-    if (code or "").upper() in _PRETRANSIT_CODES or (derived or "").upper() in _PRETRANSIT_CODES:
+def classify_row_pretransit(
+    code: str, derived: str, status_by_locale: str, description: str
+) -> bool:
+    """
+    Independent indicator: detect pre-transit / label-created signals.
+    Do NOT exclude when delivered/exception text is present; indicators are non-exclusive.
+    """
+    cu, du = (code or "").upper(), (derived or "").upper()
+    if cu in _PRETRANSIT_CODES or du in _PRETRANSIT_CODES:
         return True
-    # then text-based
+    # text fallback
+    s = status_by_locale or ""
+    d = description or ""
     return _any_in(s, _PRETRANSIT_HINTS) or _any_in(d, _PRETRANSIT_HINTS)
 
 
+def classify_row_delivered(
+    code: str, derived: str, status_by_locale: str, description: str
+) -> bool:
+    cu, du = (code or "").upper(), (derived or "").upper()
+    if cu in _DELIVERED_CODES or du in _DELIVERED_CODES:
+        return True
+    return _any_in(status_by_locale, _DELIVERED_HINTS) or _any_in(description, _DELIVERED_HINTS)
+
+
+def classify_row_exception(
+    code: str, derived: str, status_by_locale: str, description: str
+) -> bool:
+    cu, du = (code or "").upper(), (derived or "").upper()
+    if cu in _EXCEPTION_CODES or du in _EXCEPTION_CODES:
+        return True
+    return _any_in(status_by_locale, _EXCEPTION_HINTS) or _any_in(description, _EXCEPTION_HINTS)
+
+
 def apply_rules(df: pd.DataFrame, *, status_col: str = "CalculatedStatus") -> pd.DataFrame:
+    """
+    Apply simple precedence:
+      1) Delivered
+      2) Exception
+      3) PreTransit
+    Only sets status when current value is empty.
+    """
     out = df.copy()
-    # guards
+
+    # Ensure required columns exist (avoid KeyError / NaN in Excel)
     for col in ("code", "derivedCode", "statusByLocale", "description", status_col):
         if col not in out.columns:
-            out[col] = ""  # keep as empty string to avoid NaN in Excel
+            out[col] = ""
 
-    # Only fill when empty
-    mask_empty = out[status_col].astype("string").fillna("") == ""
-    pretransit_mask = out.apply(
-        lambda r: classify_row_pretransit(
+    # Helper to read + coerce to str
+    def _fields(r: pd.Series) -> tuple[str, str, str, str]:
+        return (
             str(r.get("code", "")),
             str(r.get("derivedCode", "")),
             str(r.get("statusByLocale", "")),
             str(r.get("description", "")),
-        ),
-        axis=1,
-    )
-    out.loc[mask_empty & pretransit_mask, status_col] = PRETRANSIT
+        )
+
+    # Only fill when empty
+    empty = out[status_col].astype("string").fillna("") == ""
+
+    # 1) Delivered
+    deliv_mask = out.apply(
+        lambda r: classify_row_delivered(*_fields(r)), axis=1)
+    out.loc[empty & deliv_mask, status_col] = DELIVERED
+    empty = out[status_col].astype("string").fillna("") == ""
+
+    # 2) Exception
+    exc_mask = out.apply(lambda r: classify_row_exception(*_fields(r)), axis=1)
+    out.loc[empty & exc_mask, status_col] = EXCEPTION
+    empty = out[status_col].astype("string").fillna("") == ""
+
+    # 3) PreTransit
+    pre_mask = out.apply(
+        lambda r: classify_row_pretransit(*_fields(r)), axis=1)
+    out.loc[empty & pre_mask, status_col] = PRETRANSIT
+
+    # Ensure dtype is string for the status col
     out[status_col] = out[status_col].astype("string").fillna("")
     return out
