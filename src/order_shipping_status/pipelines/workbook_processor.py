@@ -84,36 +84,20 @@ class WorkbookProcessor:
 
         # --- Metrics: DaysSinceLatestEvent (vectorized, NaT-safe) ---
         # Compute BEFORE indicators, because IsStalled depends on this metric.
-
-        # Use injected 'now' if provided; else real utcnow
-        now = pd.Timestamp(
-            self.reference_now or dt.datetime.now(dt.timezone.utc))
-
-        if "LatestEventTimestampUtc" in df_out.columns:
-            ts = df_out["LatestEventTimestampUtc"].astype("string").fillna("")
-
-            def _parse_utc(s: str) -> pd.Timestamp | None:
-                try:
-                    t = pd.to_datetime(s, utc=True)
-                    return None if pd.isna(t) else t
-                except Exception:
-                    return None
-            parsed = ts.apply(_parse_utc)
-            days = parsed.apply(lambda t: int((now - t).days)
-                                if t is not None else None)
-            df_out["DaysSinceLatestEvent"] = (
-                pd.to_numeric(days, errors="coerce").fillna(0).astype("int64")
-            )
+        # Use injected 'reference_now' if provided (expects UTC or naive -> force UTC); else current UTC.
+        if self.reference_now is not None:
+            # If reference_now is naive, localize to UTC; if tz-aware, convert to UTC
+            ref_ts = pd.Timestamp(self.reference_now)
+            now_utc = ref_ts.tz_localize(
+                "UTC") if ref_ts.tzinfo is None else ref_ts.tz_convert("UTC")
         else:
-            df_out["DaysSinceLatestEvent"] = 0
+            now_utc = pd.Timestamp(dt.datetime.now(dt.timezone.utc))
 
         if "LatestEventTimestampUtc" in df_out.columns:
             ts = pd.to_datetime(
-                df_out["LatestEventTimestampUtc"].astype("string"),
-                errors="coerce",
-                utc=True,
+                df_out["LatestEventTimestampUtc"], errors="coerce", utc=True
             )
-            days = (now - ts).dt.days  # float with NaN for NaT
+            days = (now_utc - ts).dt.days  # NaT -> NaN
             df_out["DaysSinceLatestEvent"] = (
                 pd.to_numeric(days, errors="coerce").fillna(0).astype("int64")
             )
@@ -127,7 +111,7 @@ class WorkbookProcessor:
         df_out = map_indicators_to_status(df_out)
 
         # Marker + write
-        now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_iso_utc = dt.datetime.now(dt.timezone.utc).isoformat()
         has_creds = bool(
             getattr(env_cfg, "SHIPPING_CLIENT_ID", "")
             and getattr(env_cfg, "SHIPPING_CLIENT_SECRET", "")
@@ -139,7 +123,7 @@ class WorkbookProcessor:
                     "input_name": input_path.name,
                     "input_dir": str(input_path.parent),
                     "output_name": processed_path.name,
-                    "timestamp_utc": now_utc,
+                    "timestamp_utc": now_iso_utc,
                     "env_has_creds": has_creds,
                     "input_rows": len(df_in),
                     "input_cols": len(df_in.columns),
@@ -158,7 +142,7 @@ class WorkbookProcessor:
         return {
             "output_path": str(processed_path),
             "env_has_creds": has_creds,
-            "timestamp_utc": now_utc,
+            "timestamp_utc": now_iso_utc,
             "output_cols": list(df_out.columns),
             "output_shape": (len(df_out), len(df_out.columns)),
         }
