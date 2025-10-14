@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import datetime as dt
 from pathlib import Path
 
 from .config.logging_config import get_logger
@@ -50,10 +51,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="YYYY-MM-DD anchor date for the prior-week filter (Sunday..Saturday).",
     )
     p.add_argument(
+        "--debug-sidecar",
+        type=Path,
+        default=None,
+        help="Write normalized sidecar JSON per tracking number to this directory.",
+    )
+    # NEW: allow disabling the date filter used by the Preprocessor
+    p.add_argument(
         "--skip-date-filter",
         action="store_true",
-        help="Skip the prior-week Promised Delivery Date filter.",
+        help="Disable prior-week date filtering (useful for replay tests).",
     )
+
+    p.add_argument(
+        "--stalled-threshold-days",
+        type=int,
+        default=4,
+        help="If DaysSinceLatestEvent >= this value (and not Delivered/Exception/RTS), mark IsStalled=1. Default: 4",
+    )
+
     return p
 
 
@@ -96,7 +112,6 @@ def main(argv: list[str] | None = None) -> int:
     normalizer = None
 
     if args.replay_dir:
-        # Lazy imports to keep startup light
         from .api.client import ReplayClient
         from .api.normalize import normalize_fedex
 
@@ -127,9 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     # Reference date (optional)
     reference_date = None
     if args.reference_date:
-        from datetime import date
         try:
-            reference_date = date.fromisoformat(args.reference_date)
+            reference_date = dt.date.fromisoformat(args.reference_date)
         except ValueError:
             logger.error(
                 "Invalid --reference-date: %s (expected YYYY-MM-DD)", args.reference_date)
@@ -142,9 +156,18 @@ def main(argv: list[str] | None = None) -> int:
             client=client,
             normalizer=normalizer,
             reference_date=reference_date,
-            enable_date_filter=not args.skip_date_filter,
+            enable_date_filter=not args.skip_date_filter,  # <-- wire the flag
+            stalled_threshold_days=args.stalled_threshold_days,
         )
-        processor.process(args.input, processed_path, env_cfg)
+
+        # Process workbook (write processed xlsx + marker)
+        processor.process(
+            args.input,
+            processed_path,
+            env_cfg=env_cfg,
+            sidecar_dir=args.debug_sidecar,
+        )
+
     except FileNotFoundError as e:
         logger.error("Input missing: %s", e)
         return 2

@@ -12,6 +12,7 @@ from order_shipping_status.pipelines.column_contract import ColumnContract
 from order_shipping_status.pipelines.enricher import Enricher
 from order_shipping_status.pipelines.preprocessor import Preprocessor
 from order_shipping_status.rules.indicators import apply_indicators
+from order_shipping_status.rules.status_mapper import map_indicators_to_status
 
 
 class WorkbookProcessor:
@@ -25,12 +26,16 @@ class WorkbookProcessor:
         normalizer: Optional[Any] = None,
         reference_date: dt.date | None = None,
         enable_date_filter: bool = True,
+        stalled_threshold_days: int = 4,
+        reference_now: dt.datetime | None = None,
     ) -> None:
         self.logger = logger
         self.client = client
         self.normalizer = normalizer
         self.reference_date = reference_date
         self.enable_date_filter = enable_date_filter
+        self.stalled_threshold_days = int(stalled_threshold_days)
+        self.reference_now = reference_now
 
     def process(
         self,
@@ -77,8 +82,49 @@ class WorkbookProcessor:
             normalizer=self.normalizer,
         ).enrich(df_out, sidecar_dir=sidecar_dir)
 
-        # Classification rules
-        df_out = apply_indicators(df_out)
+        # --- Metrics: DaysSinceLatestEvent (vectorized, NaT-safe) ---
+        # Compute BEFORE indicators, because IsStalled depends on this metric.
+
+        # Use injected 'now' if provided; else real utcnow
+        now = pd.Timestamp(
+            self.reference_now or dt.datetime.now(dt.timezone.utc))
+
+        if "LatestEventTimestampUtc" in df_out.columns:
+            ts = df_out["LatestEventTimestampUtc"].astype("string").fillna("")
+
+            def _parse_utc(s: str) -> pd.Timestamp | None:
+                try:
+                    t = pd.to_datetime(s, utc=True)
+                    return None if pd.isna(t) else t
+                except Exception:
+                    return None
+            parsed = ts.apply(_parse_utc)
+            days = parsed.apply(lambda t: int((now - t).days)
+                                if t is not None else None)
+            df_out["DaysSinceLatestEvent"] = (
+                pd.to_numeric(days, errors="coerce").fillna(0).astype("int64")
+            )
+        else:
+            df_out["DaysSinceLatestEvent"] = 0
+
+        if "LatestEventTimestampUtc" in df_out.columns:
+            ts = pd.to_datetime(
+                df_out["LatestEventTimestampUtc"].astype("string"),
+                errors="coerce",
+                utc=True,
+            )
+            days = (now - ts).dt.days  # float with NaN for NaT
+            df_out["DaysSinceLatestEvent"] = (
+                pd.to_numeric(days, errors="coerce").fillna(0).astype("int64")
+            )
+        else:
+            df_out["DaysSinceLatestEvent"] = 0
+
+        # Classification rules: indicators first, then map to status
+        df_out = apply_indicators(
+            df_out, stalled_threshold_days=self.stalled_threshold_days
+        )
+        df_out = map_indicators_to_status(df_out)
 
         # Marker + write
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat()

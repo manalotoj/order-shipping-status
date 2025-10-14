@@ -1,7 +1,7 @@
 {
   "python.testing.pytestArgs": [
     "tests",
-    "--maxfail=1",
+    "--maxfail=0",
     "-q"
   ],
   "python.testing.unittestEnabled": false,

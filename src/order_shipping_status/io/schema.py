@@ -1,16 +1,16 @@
 # src/order_shipping_status/io/schema.py
 from __future__ import annotations
 
-# Columns we add to the output (to be populated from API normalization later)
-OUTPUT_FEDEX_COLUMNS = [
-    "code",
-    "derivedCode",
-    "statusByLocale",
-    "description",
-]
 
-# Output-calculated status column name
+OUTPUT_FEDEX_COLUMNS = ["code", "derivedCode", "statusByLocale", "description"]
 OUTPUT_STATUS_COLUMN = "CalculatedStatus"
+INDICATOR_COLS = ["IsPreTransit", "IsDelivered", "HasException", "IsRTS"]
+AUX_COLS = ["CalculatedReasons",
+            "LatestEventTimestampUtc", "DaysSinceLatestEvent"]
+
+# desired order suffix (original columns are kept in their original order first)
+OUTPUT_SUFFIX_ORDER = OUTPUT_FEDEX_COLUMNS + \
+    INDICATOR_COLS + [OUTPUT_STATUS_COLUMN] + AUX_COLS
 
 # Known legacy name in the input (we won't rename input now; this is for reference)
 LEGACY_STATUS_COLUMN = "Delivery Tracking Status"
