@@ -43,10 +43,11 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     proc.process(src, out, env)
 
     df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    assert df.loc[0, "code"] == "DLV"
-    assert df.loc[0, "derivedCode"] == "DLV"
-    assert df.loc[0, "statusByLocale"] == "Delivered"
-    assert df.loc[0, "description"] == "Left at front door"
+    # read_excel may return NaN for empty cells; coerce to str for robust assertions
+    assert str(df.loc[0, "code"]) == "DLV"
+    assert str(df.loc[0, "derivedCode"]) == "DLV"
+    assert str(df.loc[0, "statusByLocale"]) == "Delivered"
+    assert str(df.loc[0, "description"]) == "Left at front door"
 
 
 class QL:

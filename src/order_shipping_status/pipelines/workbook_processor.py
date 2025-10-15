@@ -1,4 +1,3 @@
-# src/order_shipping_status/pipelines/workbook_processor.py
 from __future__ import annotations
 
 import datetime as dt
@@ -13,6 +12,7 @@ from order_shipping_status.pipelines.enricher import Enricher
 from order_shipping_status.pipelines.preprocessor import Preprocessor
 from order_shipping_status.rules.indicators import apply_indicators
 from order_shipping_status.rules.status_mapper import map_indicators_to_status
+from openpyxl import load_workbook
 
 
 class WorkbookProcessor:
@@ -84,20 +84,16 @@ class WorkbookProcessor:
 
         # --- Metrics: DaysSinceLatestEvent (vectorized, NaT-safe) ---
         # Compute BEFORE indicators, because IsStalled depends on this metric.
-        # Use injected 'reference_now' if provided (expects UTC or naive -> force UTC); else current UTC.
-        if self.reference_now is not None:
-            # If reference_now is naive, localize to UTC; if tz-aware, convert to UTC
-            ref_ts = pd.Timestamp(self.reference_now)
-            now_utc = ref_ts.tz_localize(
-                "UTC") if ref_ts.tzinfo is None else ref_ts.tz_convert("UTC")
-        else:
-            now_utc = pd.Timestamp(dt.datetime.now(dt.timezone.utc))
+        now = pd.Timestamp(
+            self.reference_now or dt.datetime.now(dt.timezone.utc))
 
         if "LatestEventTimestampUtc" in df_out.columns:
             ts = pd.to_datetime(
-                df_out["LatestEventTimestampUtc"], errors="coerce", utc=True
+                df_out["LatestEventTimestampUtc"].astype("string"),
+                errors="coerce",
+                utc=True,
             )
-            days = (now_utc - ts).dt.days  # NaT -> NaN
+            days = (now - ts).dt.days  # float with NaN for NaT
             df_out["DaysSinceLatestEvent"] = (
                 pd.to_numeric(days, errors="coerce").fillna(0).astype("int64")
             )
@@ -110,8 +106,15 @@ class WorkbookProcessor:
         )
         df_out = map_indicators_to_status(df_out)
 
+        # Normalize CalculatedReasons to concrete empty strings (object dtype)
+        if "CalculatedReasons" in df_out.columns:
+            cr = df_out["CalculatedReasons"]
+            cr = cr.astype("object")
+            cr = cr.where(pd.notna(cr), "")
+            df_out["CalculatedReasons"] = cr
+
         # Marker + write
-        now_iso_utc = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
         has_creds = bool(
             getattr(env_cfg, "SHIPPING_CLIENT_ID", "")
             and getattr(env_cfg, "SHIPPING_CLIENT_SECRET", "")
@@ -123,7 +126,7 @@ class WorkbookProcessor:
                     "input_name": input_path.name,
                     "input_dir": str(input_path.parent),
                     "output_name": processed_path.name,
-                    "timestamp_utc": now_iso_utc,
+                    "timestamp_utc": now_utc,
                     "env_has_creds": has_creds,
                     "input_rows": len(df_in),
                     "input_cols": len(df_in.columns),
@@ -135,14 +138,38 @@ class WorkbookProcessor:
 
         processed_path.parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(processed_path, engine="openpyxl", mode="w") as xw:
-            df_out.to_excel(xw, sheet_name="Processed", index=False)
+            # Write NaN values as empty strings so a subsequent read_excel call
+            # returns '' instead of NaN for empty string columns (tests expect "").
+            df_out.to_excel(xw, sheet_name="Processed", index=False, na_rep="")
             marker.to_excel(xw, sheet_name="Marker", index=False)
+
+        # Post-process the written workbook to ensure explicit empty-string cells
+        # for string columns where pandas might later interpret blank cells as NaN.
+        try:
+            wb = load_workbook(processed_path)
+            if "Processed" in wb.sheetnames:
+                ws = wb["Processed"]
+                # Find the column index for 'CalculatedReasons' (1-indexed)
+                header = [c.value for c in next(
+                    ws.iter_rows(min_row=1, max_row=1))]
+                if "CalculatedReasons" in header:
+                    col_idx = header.index("CalculatedReasons") + 1
+                    # Iterate data rows and replace None with explicit empty-string cells
+                    for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                        cell = row[0]
+                        if cell.value is None:
+                            cell.value = ""
+                            cell.data_type = "s"
+            wb.save(processed_path)
+        except Exception:
+            # If openpyxl post-processing fails, continue — writing already completed.
+            pass
 
         self.logger.info("Wrote processed workbook → %s", processed_path)
         return {
             "output_path": str(processed_path),
             "env_has_creds": has_creds,
-            "timestamp_utc": now_iso_utc,
+            "timestamp_utc": now_utc,
             "output_cols": list(df_out.columns),
             "output_shape": (len(df_out), len(df_out.columns)),
         }

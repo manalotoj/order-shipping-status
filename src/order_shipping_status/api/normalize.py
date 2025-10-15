@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple
+import pandas as pd
 
 
 def _from_latest_status_detail(payload: Dict[str, Any]) -> Tuple[str, str, str, str]:
@@ -84,6 +85,68 @@ def _from_flat(payload: Dict[str, Any]) -> Tuple[str, str, str, str]:
     status = str(payload.get("statusByLocale") or "")
     desc = str(payload.get("description") or "")
     return code, derived, status, desc
+
+
+def _latest_event_ts_utc(payload: Dict[str, Any]) -> str:
+    """Return latest timestamp across scanEvents.date and dateAndTimes.dateTime
+
+    Searches top-level and nested paths used by FedEx output. Returns an ISO8601
+    UTC string (with trailing 'Z') or empty string when nothing parseable found.
+    """
+    candidates = []
+
+    def _add(obj, key):
+        if isinstance(obj, dict):
+            v = obj.get(key)
+            if v:
+                candidates.append(v)
+
+    # top-level scanEvents/dateAndTimes
+    se = payload.get("scanEvents")
+    if isinstance(se, list):
+        for ev in se:
+            _add(ev, "date")
+
+    dat = payload.get("dateAndTimes")
+    if isinstance(dat, list):
+        for d in dat:
+            _add(d, "dateTime")
+
+    # nested under output.completeTrackResults[*].trackResults[*]
+    out = payload.get("output", payload)
+    if isinstance(out, dict):
+        ctr = out.get("completeTrackResults")
+        if isinstance(ctr, list):
+            for cr in ctr:
+                if not isinstance(cr, dict):
+                    continue
+                tr_list = cr.get("trackResults")
+                if isinstance(tr_list, list):
+                    for tr in tr_list:
+                        if not isinstance(tr, dict):
+                            continue
+                        se2 = tr.get("scanEvents")
+                        if isinstance(se2, list):
+                            for ev in se2:
+                                _add(ev, "date")
+                        dat2 = tr.get("dateAndTimes")
+                        if isinstance(dat2, list):
+                            for d in dat2:
+                                _add(d, "dateTime")
+
+    if not candidates:
+        return ""
+
+    # Use pandas for robust parsing and utc normalization
+    ts = pd.to_datetime(candidates, utc=True, errors="coerce")
+    ts = ts.dropna()
+    if ts.empty:
+        return ""
+    latest = ts.max()
+    iso = latest.isoformat()
+    if iso.endswith("+00:00"):
+        iso = iso.replace("+00:00", "Z")
+    return iso
 
 
 def _carrier_from_code(carrier_code: str) -> str:

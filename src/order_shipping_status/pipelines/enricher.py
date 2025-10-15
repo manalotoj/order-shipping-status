@@ -1,221 +1,238 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
-import datetime as _dt
+import json
+from pathlib import Path
+from typing import Optional, Any, Dict
 
 import pandas as pd
-
-from order_shipping_status.io.schema import OUTPUT_FEDEX_COLUMNS
-
-# Type alias: normalizer returns a NormalizedShippingData (with .to_excel_cols())
-# note: takes kwargs and returns NormalizedShippingData
-Normalizer = Callable[..., Any]
+import numpy as np
 
 
-def _parse_iso_to_utc(ts: str) -> Optional[_dt.datetime]:
-    """
-    Parse many ISO-ish timestamp shapes to an aware UTC datetime.
-    Supports:
-      - '2025-10-06T22:49:00-04:00'
-      - '2025-10-02T00:00:00+00:00'
-      - '2025-10-02T00:00:00Z'
-      - '2025-10-02T00:00:00' (assumed UTC)
-    Returns None on failure.
-    """
-    if not ts or not isinstance(ts, str):
-        return None
-    s = ts.strip()
-    if not s:
-        return None
-    # Normalize trailing Z
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = _dt.datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-    # If naive, assume UTC
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_dt.timezone.utc)
-
-    try:
-        return dt.astimezone(_dt.timezone.utc)
-    except Exception:
-        return None
-
-
-def _iter_track_results(output: dict) -> list[dict]:
-    """
-    FedEx 'output' shape helper: yield each trackResults[*] dict.
-    Safely handles missing keys.
-    """
-    if not isinstance(output, dict):
-        return []
-    ctr = output.get("completeTrackResults")
-    if not isinstance(ctr, list):
-        return []
-    out: list[dict] = []
-    for cr in ctr:
-        if not isinstance(cr, dict):
-            continue
-        trs = cr.get("trackResults")
-        if isinstance(trs, list):
-            for tr in trs:
-                if isinstance(tr, dict):
-                    out.append(tr)
-    return out
-
-
-def _extract_latest_event_ts_utc(payload: dict) -> Optional[str]:
-    """
-    Walk the payload to find the most recent timestamp from:
-      - dateAndTimes[*].dateTime
-      - scanEvents[*].date (or .dateTime if present)
-    Returns ISO8601 *UTC* string if found, else None.
-    The payload can be either the whole item or the 'output' node — we detect both.
-    """
-    if not isinstance(payload, dict):
-        return None
-
-    # Accept either the whole item (with 'output') or 'output' itself
-    output = payload.get("output") if "output" in payload else payload
-    if not isinstance(output, dict):
-        return None
-
-    candidates: list[_dt.datetime] = []
-
-    # latestStatusDetail sometimes has its own timestamp (rare, but capture it if present)
-    try:
-        for tr in _iter_track_results(output):
-            lsd = tr.get("latestStatusDetail")
-            if isinstance(lsd, dict):
-                # not standard, but just in case
-                for key in ("dateTime", "timestamp", "eventDate", "eventDateTime"):
-                    val = lsd.get(key)
-                    ts = _parse_iso_to_utc(
-                        val) if isinstance(val, str) else None
-                    if ts:
-                        candidates.append(ts)
-    except Exception:
-        pass
-
-    # dateAndTimes[*].dateTime
-    try:
-        for tr in _iter_track_results(output):
-            dat = tr.get("dateAndTimes")
-            if not isinstance(dat, list):
-                continue
-            for d in dat:
-                if not isinstance(d, dict):
-                    continue
-                s = d.get("dateTime")
-                ts = _parse_iso_to_utc(s) if isinstance(s, str) else None
-                if ts:
-                    candidates.append(ts)
-    except Exception:
-        pass
-
-    # scanEvents[*].date or .dateTime
-    try:
-        for tr in _iter_track_results(output):
-            se = tr.get("scanEvents")
-            if not isinstance(se, list):
-                continue
-            for ev in se:
-                if not isinstance(ev, dict):
-                    continue
-                s = ev.get("dateTime") or ev.get("date")
-                ts = _parse_iso_to_utc(s) if isinstance(s, str) else None
-                if ts:
-                    candidates.append(ts)
-    except Exception:
-        pass
-
-    if not candidates:
-        return None
-
-    latest = max(candidates)
-    # Return canonical ISO8601 Zulu form
-    return latest.replace(tzinfo=_dt.timezone.utc).isoformat()
+def _is_blank(val: Any) -> bool:
+    """True if value is None/NaN/empty/“nan”/“none” (case-insensitive)."""
+    if val is None:
+        return True
+    if isinstance(val, float) and np.isnan(val):
+        return True
+    s = str(val).strip()
+    return s == "" or s.lower() in {"nan", "none"}
 
 
 class Enricher:
-    def __init__(self, logger, client: Optional[Any] = None, normalizer: Optional[Normalizer] = None) -> None:
+    def __init__(self, logger, *, client: Optional[Any], normalizer: Optional[Any]):
         self.logger = logger
         self.client = client
         self.normalizer = normalizer
 
-    def enrich(self, df: pd.DataFrame, *, sidecar_dir: Optional[Any] = None) -> pd.DataFrame:
-        # If we cannot enrich, return as-is
-        if self.client is None or self.normalizer is None:
-            return df
-        if "Tracking Number" not in df.columns:
-            self.logger.debug(
-                "Enrichment skipped: 'Tracking Number' column missing.")
-            return df
+    def _safe_log(self, level: str, msg: str, *args):
+        fn = getattr(self.logger, level, None)
+        if callable(fn):
+            try:
+                fn(msg, *args)
+            except Exception:
+                pass
+
+    def _fetch_payload(self, tn: str, carrier: str):
+        """
+        Support both modern .fetch(tracking_number=..., carrier_code=...)
+        and legacy .fetch_status(tn, carrier=...).
+        """
+        if hasattr(self.client, "fetch"):
+            return self.client.fetch(tracking_number=tn, carrier_code=carrier)
+        if hasattr(self.client, "fetch_status"):
+            # ReplayClient.fetch_status historically accepted (tracking_number, carrier_code=None)
+            # Use positional call to avoid mismatched keyword names like 'carrier'.
+            return self.client.fetch_status(tn, carrier)
+        raise AttributeError(
+            "Replay client has neither .fetch nor .fetch_status")
+
+    def _normalize(self, payload, tn: str, carrier: str) -> Dict[str, Any]:
+        """
+        Accept either:
+          - dict from normalizer (already column mapping)
+          - object with .to_excel_cols()
+        Call with kwargs if supported; otherwise fallback to positional.
+        """
+        if self.normalizer is None:
+            return {}
+
+        try:
+            result = self.normalizer(
+                payload,
+                tracking_number=tn,
+                carrier_code=carrier,
+                source="replay",
+            )
+        except TypeError:
+            # Legacy normalizers that only accept the payload
+            result = self.normalizer(payload)
+
+        # object case
+        if hasattr(result, "to_excel_cols"):
+            return dict(result.to_excel_cols())
+        # dict case
+        if isinstance(result, dict):
+            return result
+        # unknown; be defensive
+        return {}
+
+    def enrich(self, df: pd.DataFrame, *, sidecar_dir: Optional[Path] = None) -> pd.DataFrame:
+        """
+        Expected columns present on input (from Preprocessor + ColumnContract):
+          - "Tracking Number"
+          - "Carrier Code"
+
+        If those columns are missing, this function is a NO-OP.
+        Otherwise, it merges normalized columns row-by-row.
+        """
+        # If no key columns, NO-OP (some tests expect exact equality)
+        if "Tracking Number" not in df.columns or "Carrier Code" not in df.columns:
+            return df.copy()
 
         out = df.copy()
 
-        # Ensure FedEx target columns exist (string default) — ColumnContract also handles this.
-        for col in OUTPUT_FEDEX_COLUMNS:
-            if col not in out.columns:
-                out[col] = ""
+        # Nothing to do without a client+normalizer
+        if self.client is None or self.normalizer is None:
+            return out
 
-        # Also ensure LatestEventTimestampUtc exists so we can fill it (string)
-        if "LatestEventTimestampUtc" not in out.columns:
-            out["LatestEventTimestampUtc"] = ""
+        # Ensure sidecar directory exists if provided
+        if sidecar_dir is not None:
+            Path(sidecar_dir).mkdir(parents=True, exist_ok=True)
 
-        tn_series = out["Tracking Number"].fillna("").astype(str)
-        cc_series = out["Carrier Code"].fillna("").astype(
-            str) if "Carrier Code" in out.columns else None
+        # Track which columns we create so we can clean NaNs to "" afterwards
+        created_cols: set[str] = set()
 
-        for idx, tracking in tn_series.items():
-            if not tracking:
+        for idx, row in out.iterrows():
+            raw_tn = row.get("Tracking Number", None)
+            raw_carrier = row.get("Carrier Code", None)
+            # Require a tracking number, but allow missing carrier (pass None)
+            if _is_blank(raw_tn):
                 continue
-            carrier = cc_series.iloc[idx] if cc_series is not None else None
+
+            tn = str(raw_tn).strip()
+            if _is_blank(raw_carrier):
+                carrier = None
+            else:
+                carrier = str(raw_carrier).strip()
+
             try:
-                payload = self.client.fetch_status(tracking, carrier)
-
-                # Run normalizer — returns NormalizedShippingData (with .to_excel_cols())
-                norm = self.normalizer(
-                    payload,
-                    tracking_number=tracking,
-                    carrier_code=carrier,
-                    source=self.client.__class__.__name__,
-                )
-                cols = norm.to_excel_cols()
-
-                # Back-fill LatestEventTimestampUtc if normalizer didn't populate it
-                let_supplied = str(
-                    cols.get("LatestEventTimestampUtc", "") or "").strip()
-                if not let_supplied:
-                    extracted = _extract_latest_event_ts_utc(payload)
-                    if extracted:
-                        cols["LatestEventTimestampUtc"] = extracted
-
-                # Write into dataframe
-                for k in OUTPUT_FEDEX_COLUMNS:
-                    out.at[idx, k] = cols.get(k, "")
-
-                # Also write LatestEventTimestampUtc if present in cols
-                if "LatestEventTimestampUtc" in cols:
-                    out.at[idx, "LatestEventTimestampUtc"] = cols["LatestEventTimestampUtc"]
-
-                # Optional: write sidecar raw body for debugging
-                if sidecar_dir:
-                    try:
-                        p = sidecar_dir / f"{tracking}.json"
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        import json as _json
-
-                        with p.open("w", encoding="utf-8") as fh:
-                            _json.dump(payload, fh, ensure_ascii=False)
-                    except Exception as sidecar_ex:
-                        self.logger.debug(
-                            "Failed writing sidecar for %s: %s", tracking, sidecar_ex)
-
+                payload = self._fetch_payload(tn, carrier)
             except Exception as ex:
-                self.logger.debug("Enrichment failed for %s: %s", tracking, ex)
+                self._safe_log(
+                    "warning", "Replay fetch failed for %s/%s: %s", carrier, tn, ex)
+                continue
+
+            try:
+                cols = self._normalize(payload, tn, carrier)
+            except Exception as ex:
+                self._safe_log(
+                    "warning", "Normalization failed for %s/%s: %s", carrier, tn, ex)
+                continue
+
+            # Merge normalized columns (strings preferred)
+            for k, v in cols.items():
+                created_cols.add(k)
+                out.at[idx, k] = v
+
+            # Backfill LatestEventTimestampUtc from raw payload if normalizer did not provide it
+            if "LatestEventTimestampUtc" not in cols:
+                try:
+                    # import here to avoid circular import at module load
+                    from order_shipping_status.api.normalize import _latest_event_ts_utc
+
+                    ts = _latest_event_ts_utc(payload)
+                    if ts:
+                        created_cols.add("LatestEventTimestampUtc")
+                        out.at[idx, "LatestEventTimestampUtc"] = ts
+                except Exception:
+                    # If helper not available or fails, ignore and continue
+                    pass
+
+            # Count scanEvents in payload (top-level or nested) and expose as ScanEventsCount
+            try:
+                def _count_scan_events(obj):
+                    count = 0
+                    if isinstance(obj, dict):
+                        se = obj.get("scanEvents")
+                        if isinstance(se, list):
+                            count += len(se)
+                        # nested completeTrackResults -> trackResults -> scanEvents
+                        outcr = obj.get("completeTrackResults")
+                        if isinstance(outcr, list):
+                            for cr in outcr:
+                                if not isinstance(cr, dict):
+                                    continue
+                                tr_list = cr.get("trackResults")
+                                if isinstance(tr_list, list):
+                                    for tr in tr_list:
+                                        if not isinstance(tr, dict):
+                                            continue
+                                        se2 = tr.get("scanEvents")
+                                        if isinstance(se2, list):
+                                            count += len(se2)
+                    return count
+
+                scan_count = _count_scan_events(payload)
+                created_cols.add("ScanEventsCount")
+                out.at[idx, "ScanEventsCount"] = int(scan_count)
+            except Exception:
+                # best-effort; ignore on failure
+                pass
+            # Collect scan event timestamps (ISO strings) into ScanEventTimestamps for use by rules
+            try:
+                def _collect_scan_dates(obj):
+                    dates = []
+                    if isinstance(obj, dict):
+                        se = obj.get("scanEvents")
+                        if isinstance(se, list):
+                            for ev in se:
+                                if isinstance(ev, dict):
+                                    for key in ("date", "dateTime", "eventDate"):
+                                        v = ev.get(key)
+                                        if isinstance(v, str) and "T" in v:
+                                            dates.append(v)
+                        outcr = obj.get("completeTrackResults")
+                        if isinstance(outcr, list):
+                            for cr in outcr:
+                                if not isinstance(cr, dict):
+                                    continue
+                                tr_list = cr.get("trackResults")
+                                if isinstance(tr_list, list):
+                                    for tr in tr_list:
+                                        if not isinstance(tr, dict):
+                                            continue
+                                        se2 = tr.get("scanEvents")
+                                        if isinstance(se2, list):
+                                            for ev2 in se2:
+                                                if isinstance(ev2, dict):
+                                                    for key in ("date", "dateTime", "eventDate"):
+                                                        v2 = ev2.get(key)
+                                                        if isinstance(v2, str) and "T" in v2:
+                                                            dates.append(v2)
+                    return dates
+
+                ts_list = _collect_scan_dates(payload)
+                created_cols.add("ScanEventTimestamps")
+                out.at[idx, "ScanEventTimestamps"] = ts_list
+            except Exception:
+                pass
+
+            # Optionally write normalized sidecar
+            if sidecar_dir is not None:
+                try:
+                    (Path(sidecar_dir) / f"{carrier}_{tn}.json").write_text(
+                        json.dumps(cols, ensure_ascii=False), encoding="utf-8"
+                    )
+                except Exception as ex:
+                    self._safe_log(
+                        "warning", "Sidecar write failed for %s/%s: %s", carrier, tn, ex)
+
+        # Ensure any newly created columns have empty strings (not NaN) where missing
+        # Be defensive: if a column somehow wasn't created by the row loop, create it now.
+        for k in created_cols:
+            if k not in out.columns:
+                out[k] = ""
+            # Use pandas string dtype and fill missing values with empty string
+            out[k] = out[k].astype("string").fillna("")
 
         return out

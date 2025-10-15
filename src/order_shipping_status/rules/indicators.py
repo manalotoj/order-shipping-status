@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Iterable
-import numpy as np
+import re
 import pandas as pd
 
-# Public contract: these are created/finalized by apply_indicators
+# Public indicator column names (used by tests and ColumnContract)
 INDICATOR_COLS: tuple[str, ...] = (
     "IsPreTransit",
     "IsDelivered",
@@ -13,167 +12,189 @@ INDICATOR_COLS: tuple[str, ...] = (
     "IsStalled",
 )
 
-# ---- helpers ----------------------------------------------------------------
+# ---- Helpers -----------------------------------------------------------------
 
 
-def _empty_like(df: pd.DataFrame) -> pd.Series:
+def _series_of_strings(df: pd.DataFrame, name: str) -> pd.Series:
+    """
+    Return an uppercase string Series for column `name`.
+    If missing, return a same-length empty string Series.
+    """
+    if name in df.columns:
+        return df[name].astype("string").fillna("").str.upper()
     return pd.Series([""] * len(df), index=df.index, dtype="string")
+
+
+def _as_int_series(s, *, length: int) -> pd.Series:
+    """
+    Coerce any input (Series or scalar) to int64 via numeric with NaN->0.
+    If scalar, broadcast to a Series of given length.
+    """
+    if not isinstance(s, pd.Series):
+        s = pd.Series([s] * length)
+    return pd.to_numeric(s, errors="coerce").fillna(0).astype("int64")
 
 
 def _get_text_cols(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
     """
-    Return (code, status, desc) as uppercase strings with empty-string fallback.
-    Robust to missing columns and non-string values.
+    Return (code, status, desc) as uppercase string Series.
+    Missing columns are treated as empty strings.
     """
-    code = df["code"] if "code" in df.columns else _empty_like(df)
-    status = df["statusByLocale"] if "statusByLocale" in df.columns else _empty_like(
-        df)
-    desc = df["description"] if "description" in df.columns else _empty_like(
-        df)
-
-    code = code.astype("string").fillna("").str.upper()
-    status = status.astype("string").fillna("").str.upper()
-    desc = desc.astype("string").fillna("").str.upper()
+    code = _series_of_strings(df, "code")
+    status = _series_of_strings(df, "statusByLocale")
+    desc = _series_of_strings(df, "description")
     return code, status, desc
 
 
-def _as_int(s: pd.Series) -> pd.Series:
-    """
-    Coerce any Series to clean integer 0/1 (or 0 for invalid), avoiding NaN -> int errors.
-    """
-    return pd.to_numeric(s, errors="coerce").fillna(0).astype("int64")
-
-
-def _any_text_contains(series: pd.Series, patterns: Iterable[str]) -> pd.Series:
-    """
-    Case: series is already uppercased. Perform OR over literal substrings (no regex).
-    """
-    if not patterns:
-        return pd.Series([False] * len(series), index=series.index)
-    out = pd.Series([False] * len(series), index=series.index)
-    for p in patterns:
-        out = out | series.str.contains(p, case=False, regex=False, na=False)
-    return out
-
-
-# ---- indicator predicates ----------------------------------------------------
-
-
-def _pretransit_mask(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    # Code-based
-    code_hit = code.isin({"OC", "LP", "IN"})
-    # Text hints
-    patt = [
-        "LABEL CREATED",
-        "SHIPMENT INFORMATION SENT TO FEDEX",
-        "LABEL",
-    ]
-    text_hit = _any_text_contains(
-        status, patt) | _any_text_contains(desc, patt)
-    return code_hit | text_hit
-
-
-def _delivered_mask(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    code_hit = code.isin({"DL", "DLV"})
-    patt = ["DELIVERED"]
-    text_hit = _any_text_contains(
-        status, patt) | _any_text_contains(desc, patt)
-    return code_hit | text_hit
-
-
-def _exception_mask(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    code_hit = code.isin({"EX", "SE", "DE"})
-    patt = ["EXCEPTION", "UNABLE TO DELIVER", "ADDRESS CORRECT", "DAMAGED"]
-    text_hit = _any_text_contains(
-        status, patt) | _any_text_contains(desc, patt)
-    return code_hit | text_hit
-
-
-def _rts_mask(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    code_hit = code.isin({"RS", "RTS", "RD"})
-    patt = ["RETURN TO SENDER",
-            "RETURNING PACKAGE TO SHIPPER", "RETURNED TO SHIPPER"]
-    text_hit = _any_text_contains(
-        status, patt) | _any_text_contains(desc, patt)
-    return code_hit | text_hit
-
-
 def _is_terminal(is_delivered: pd.Series, is_rts: pd.Series) -> pd.Series:
-    """
-    Terminal means Delivered OR RTS. Exception is NOT terminal for stalled logic.
-    """
-    d = _as_int(is_delivered) == 1
-    r = _as_int(is_rts) == 1
+    """Terminal means Delivered OR RTS."""
+    d = _as_int_series(is_delivered, length=len(is_delivered)) == 1
+    r = _as_int_series(is_rts, length=len(is_rts)) == 1
     return d | r
 
 
-def _stalled_mask(
-    days_since: pd.Series,
-    is_delivered: pd.Series,
-    is_rts: pd.Series,
-    *,
-    threshold_days: int,
-) -> pd.Series:
+def _compute_stalled(days_since, *, threshold_days: int, length: int) -> pd.Series:
+    """Stalled if DaysSinceLatestEvent >= threshold_days."""
+    days = _as_int_series(days_since, length=length)
+    return (days >= int(threshold_days)).astype("int64")
+
+# ---- PreTransit / Delivered / Exception / RTS rules --------------------------
+
+
+_PRETRANSIT_CODES = {"OC", "LP", "IN"}
+_DELIVERED_CODES = {"DL"}
+_EXCEPTION_CODES = {"DE", "SE", "EX", "EXC"}
+_RTS_CODES = {"RS", "RTS"}
+
+_PRETRANSIT_TEXTS = (
+    "LABEL CREATED",
+    "SHIPMENT INFORMATION SENT TO FEDEX",
+    "LABEL HAS BEEN CREATED",
+)
+_DELIVERED_TEXTS = ("DELIVERED",)
+_EXCEPTIONS_TEXT = (
+    "EXCEPTION",
+    "DELIVERY EXCEPTION",
+    "DAMAGED",
+    "UNABLE TO DELIVER",
+)
+
+_RTS_REGEX = re.compile(
+    r"RETURN(?:ING)?\s+PACKAGE\s+TO\s+SHIPPER|RETURN\s+TO\s+SHIPPER",
+    re.IGNORECASE,
+)
+
+
+def _is_pretransit(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
+    c = code.isin(_PRETRANSIT_CODES)
+    patt = "|".join(map(re.escape, _PRETRANSIT_TEXTS))
+    s = status.str.contains(patt, case=False, regex=True)
+    d = desc.str.contains(patt, case=False, regex=True)
+    return c | s | d
+
+
+def _is_delivered_text(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
+    c = code.isin(_DELIVERED_CODES)
+    patt = "|".join(map(re.escape, _DELIVERED_TEXTS))
+    s = status.str.contains(patt, case=False, regex=True)
+    d = desc.str.contains(patt, case=False, regex=True)
+    return c | s | d
+
+
+def _has_exception(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
+    c = code.isin(_EXCEPTION_CODES)
+    patt = "|".join(map(re.escape, _EXCEPTIONS_TEXT))
+    s = status.str.contains(patt, case=False, regex=True)
+    d = desc.str.contains(patt, case=False, regex=True)
+    return c | s | d
+
+
+def _is_rts_text(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
+    c = code.isin(_RTS_CODES)
+    s = status.str_contains(_RTS_REGEX) if hasattr(
+        status, "str_contains") else status.str.contains(_RTS_REGEX)
+    d = desc.str_contains(_RTS_REGEX) if hasattr(
+        desc, "str_contains") else desc.str.contains(_RTS_REGEX)
+    return c | s | d
+
+
+def apply_indicators(df: pd.DataFrame, *, stalled_threshold_days: int = 4) -> pd.DataFrame:
     """
-    Stalled if (DaysSinceLatestEvent >= threshold) AND NOT terminal(Delivered|RTS).
-    Exception does NOT block stalled.
-    """
-    days = _as_int(days_since)  # invalid/missing -> 0
-    terminal = _is_terminal(is_delivered, is_rts)
-    return (days >= int(threshold_days)) & (~terminal)
+    Create/overwrite indicator columns:
+      - IsPreTransit, IsDelivered, HasException, IsRTS, IsStalled
 
+    Stalled rule:
+      - Stalled if DaysSinceLatestEvent >= threshold
+      - Delivered OR RTS => not stalled (forced 0)
+      - Exception does NOT block stalled
 
-# ---- main entry --------------------------------------------------------------
-
-
-def apply_indicators(
-    df: pd.DataFrame,
-    *,
-    stalled_threshold_days: int = 4,
-) -> pd.DataFrame:
-    """
-    Compute and (re)write the indicator columns:
-      - IsPreTransit
-      - IsDelivered
-      - HasException
-      - IsRTS
-      - IsStalled   (uses DaysSinceLatestEvent and ignores Exception as a blocker)
-
-    IMPORTANT: If the input already contains any of the indicator columns, we
-    **merge** with the derived values (logical OR / max), instead of overwriting.
-    This preserves explicitly provided indicators (e.g., from tests or upstream steps).
+    If incoming DataFrame already has IsDelivered/IsRTS, we RESPECT those flags.
     """
     out = df.copy()
 
-    # Ensure indicator columns exist (so downstream dtype coercions are stable)
+    # Ensure all indicator columns exist (stable pipeline)
     for col in INDICATOR_COLS:
         if col not in out.columns:
             out[col] = 0
 
-    # Text fields
     code, status, desc = _get_text_cols(out)
 
-    # Derived (from text) masks as 0/1
-    derived_pre = _pretransit_mask(code, status, desc).astype("int64")
-    derived_dlv = _delivered_mask(code, status, desc).astype("int64")
-    derived_exc = _exception_mask(code, status, desc).astype("int64")
-    derived_rts = _rts_mask(code, status, desc).astype("int64")
+    # PreTransit always computed from text/code
+    pre = _is_pretransit(code, status, desc)
 
-    # Merge with any pre-existing indicator values (max == logical OR for 0/1)
-    out["IsPreTransit"] = np.maximum(_as_int(out["IsPreTransit"]), derived_pre)
-    out["IsDelivered"] = np.maximum(_as_int(out["IsDelivered"]), derived_dlv)
-    out["HasException"] = np.maximum(_as_int(out["HasException"]), derived_exc)
-    out["IsRTS"] = np.maximum(_as_int(out["IsRTS"]), derived_rts)
+    # Delivered/RTS: combine pre-seeded flags with text-based detection.
+    # This allows ColumnContract (which may add zero-filled indicator columns
+    # before enrichment) to coexist with normalized text produced later.
+    dlv_text = _is_delivered_text(code, status, desc)
+    if "IsDelivered" in df.columns:
+        existing_dlv = _as_int_series(df["IsDelivered"], length=len(df)) == 1
+        dlv = dlv_text | existing_dlv
+    else:
+        dlv = dlv_text
 
-    # Stalled (Exception does NOT block stalled)
-    if "DaysSinceLatestEvent" not in out.columns:
-        out["DaysSinceLatestEvent"] = 0
-    stalled = _stalled_mask(
-        out["DaysSinceLatestEvent"],
-        out["IsDelivered"],
-        out["IsRTS"],
-        threshold_days=stalled_threshold_days,
-    ).astype("int64")
-    out["IsStalled"] = stalled
+    rts_text = _is_rts_text(code, status, desc)
+    if "IsRTS" in df.columns:
+        existing_rts = _as_int_series(df["IsRTS"], length=len(df)) == 1
+        rts = rts_text | existing_rts
+    else:
+        # use text-based RTS if not preseeded
+        rts = rts_text
+
+    exc = _has_exception(code, status, desc)
+
+    # Materialize as 0/1 int64, robust to NaN
+    out["IsPreTransit"] = pre.astype("int64")
+    out["IsDelivered"] = dlv.astype("int64")
+    out["HasException"] = exc.astype("int64")
+    out["IsRTS"] = rts.astype("int64")
+
+    # Terminal (Delivered or RTS)
+    terminal = _is_terminal(out.get("IsDelivered", 0), out.get("IsRTS", 0))
+
+    # Stalled: Exception does NOT block stalled; only Delivered/RTS force 0
+    if "DaysSinceLatestEvent" in out.columns:
+        days = out["DaysSinceLatestEvent"]
+    else:
+        days = pd.Series([0] * len(out), index=out.index)
+    stalled_raw = _compute_stalled(
+        days, threshold_days=stalled_threshold_days, length=len(out))
+
+    # Primary stalled condition: DaysSinceLatestEvent >= threshold
+    stalled_cond = stalled_raw.astype("bool")
+
+    # Also consider records with zero scan events at all (no scans in history)
+    if "ScanEventsCount" in out.columns:
+        scan_ct = _as_int_series(out["ScanEventsCount"], length=len(out))
+        no_scans = (scan_ct == 0)
+        stalled_cond = stalled_cond | no_scans
+
+    # Exclude terminal states (Delivered or RTS) and PRE-TRANSIT
+    pre = _as_int_series(out.get("IsPreTransit", 0), length=len(out)) == 1
+    terminal = _is_terminal(out.get("IsDelivered", 0), out.get("IsRTS", 0))
+
+    final_stalled = stalled_cond & (~terminal) & (~pre)
+
+    out["IsStalled"] = _as_int_series(
+        final_stalled.astype(int), length=len(out))
 
     return out
