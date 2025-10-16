@@ -177,16 +177,53 @@ def normalize_fedex(
     Timestamp/backfill (LatestEventTimestampUtc) is intentionally NOT performed here
     to keep unit tests deterministic; that happens later during enrichment/processing.
     """
+    # If the payload contains a batch of completeTrackResults, try to narrow
+    # the payload down to the matching entry for this tracking number so our
+    # helpers examine the correct record (avoid taking ctr[0] blindly).
+    focus_payload = payload
+    try:
+        out = payload.get("output", payload) if isinstance(
+            payload, dict) else payload
+        if isinstance(out, dict):
+            ctr = out.get("completeTrackResults")
+            if isinstance(ctr, list) and len(ctr) > 1:
+                match = None
+                for cr in ctr:
+                    if not isinstance(cr, dict):
+                        continue
+                    # direct trackingNumber on the container
+                    if str(cr.get("trackingNumber") or "") == str(tracking_number):
+                        match = cr
+                        break
+                    # check nested trackResults[*].trackingNumberInfo.trackingNumber
+                    tr_list = cr.get("trackResults")
+                    if isinstance(tr_list, list):
+                        for tr in tr_list:
+                            if not isinstance(tr, dict):
+                                continue
+                            tinfo = tr.get("trackingNumberInfo") or {}
+                            if str(tinfo.get("trackingNumber") or "") == str(tracking_number):
+                                match = cr
+                                break
+                        if match:
+                            break
+                if match is not None:
+                    focus_payload = {"output": {
+                        "completeTrackResults": [match]}}
+    except Exception:
+        # Best-effort scoping; fall back to original payload on any error
+        focus_payload = payload
+
     # 1) Deep, official path
-    code, derived, status, desc = _from_latest_status_detail(payload)
+    code, derived, status, desc = _from_latest_status_detail(focus_payload)
 
     # 2) Fallback: scanEvents (top-level or nested)
     if not code and not status:
-        code, derived, status, desc = _from_scan_events(payload)
+        code, derived, status, desc = _from_scan_events(focus_payload)
 
     # 3) Fallback: flat shape (unit tests rely on this)
     if not code and not status:
-        code, derived, status, desc = _from_flat(payload)
+        code, derived, status, desc = _from_flat(focus_payload)
 
     # Import here to avoid circulars on module import
     from order_shipping_status.models import NormalizedShippingData

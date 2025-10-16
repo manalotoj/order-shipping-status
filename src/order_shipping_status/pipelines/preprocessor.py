@@ -38,8 +38,17 @@ class Preprocessor:
         if "Promised Delivery Date" not in df.columns:
             return df
         start, end = self.prior_week_range()
-        dates = pd.to_datetime(
-            df["Promised Delivery Date"], errors="coerce", utc=False).dt.date
+        # Use infer_datetime_format to reduce noisy pandas warnings about format discovery.
+        # Wrap in warnings.catch_warnings to suppress a known pandas UserWarning about
+        # falling back to dateutil when formats are ambiguous.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="Could not infer format, so each element will be parsed individually, falling back to `dateutil`.")
+            dates = pd.to_datetime(
+                df["Promised Delivery Date"], errors="coerce", utc=False
+            ).dt.date
         return df.loc[(dates >= start) & (dates <= end)].copy()
 
     def _filter_not_delivered(self, df: pd.DataFrame) -> pd.DataFrame:

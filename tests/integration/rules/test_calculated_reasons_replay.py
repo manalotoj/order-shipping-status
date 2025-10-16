@@ -81,7 +81,7 @@ class _QuietLogger:
 
 def _expected_reasons_row(row: pd.Series) -> str:
     active = []
-    # Order must match the mapper's order: PreTransit;Delivered;Exception;ReturnedToSender
+    # Order must match the mapper's order in status_mapper: PreTransit;Delivered;Exception;ReturnedToSender;Stalled
     if int(row.get("IsPreTransit", 0)) == 1:
         active.append("PreTransit")
     if int(row.get("IsDelivered", 0)) == 1:
@@ -90,6 +90,8 @@ def _expected_reasons_row(row: pd.Series) -> str:
         active.append("Exception")
     if int(row.get("IsRTS", 0)) == 1:
         active.append("ReturnedToSender")
+    if int(row.get("IsStalled", 0)) == 1:
+        active.append("Stalled")
     return ";".join(active)
 
 

@@ -61,7 +61,7 @@ def _compute_stalled(days_since, *, threshold_days: int, length: int) -> pd.Seri
 # ---- PreTransit / Delivered / Exception / RTS rules --------------------------
 
 
-_PRETRANSIT_CODES = {"OC", "LP", "IN"}
+_PRETRANSIT_CODES = {"OC"}
 _DELIVERED_CODES = {"DL"}
 _EXCEPTION_CODES = {"DE", "SE", "EX", "EXC"}
 _RTS_CODES = {"RS", "RTS"}
@@ -86,19 +86,15 @@ _RTS_REGEX = re.compile(
 
 
 def _is_pretransit(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    c = code.isin(_PRETRANSIT_CODES)
-    patt = "|".join(map(re.escape, _PRETRANSIT_TEXTS))
-    s = status.str.contains(patt, case=False, regex=True)
-    d = desc.str.contains(patt, case=False, regex=True)
-    return c | s | d
+    # Pre-transit is only when the latest status code is exactly 'OC'.
+    # Do not rely on status/description text heuristics here.
+    return code == "OC"
 
 
 def _is_delivered_text(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    c = code.isin(_DELIVERED_CODES)
-    patt = "|".join(map(re.escape, _DELIVERED_TEXTS))
-    s = status.str.contains(patt, case=False, regex=True)
-    d = desc.str.contains(patt, case=False, regex=True)
-    return c | s | d
+    # Only treat as delivered when the latest status code is exactly 'DL'.
+    # Do not rely on status/description text heuristics.
+    return code == "DL"
 
 
 def _has_exception(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:

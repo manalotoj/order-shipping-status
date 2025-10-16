@@ -68,8 +68,14 @@ def _latest_status_fields(body: dict) -> tuple[str, str, str]:
 def _find_delivered(mapping: dict[str, dict], limit: int) -> list[str]:
     found: list[str] = []
     for tn, body in mapping.items():
-        code, status, _ = _latest_status_fields(body)
-        if (code or "").upper() in {"DLV", "DL", "DEL"} or "delivered" in (status or "").lower():
+        # Use the same normalization logic the pipeline uses to pick delivered
+        try:
+            nd = normalize_fedex(body, tracking_number=tn,
+                                 carrier_code="FDX", source="api")
+            code = (nd.code or "").upper()
+        except Exception:
+            code = ""
+        if code == "DL":
             found.append(tn)
             if len(found) >= limit:
                 break
@@ -81,12 +87,16 @@ def raw_capture_path() -> Path:
     candidates = [
         Path("tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
         Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
+        # also try relative to this test file (robust when cwd is different)
+        Path(__file__).resolve().parent.parent.parent / "data" /
+        "RAW_TransitIssues_10-7-2025_api_bodies.json",
     ]
     for p in candidates:
         if p.exists():
             return p
-    pytest.skip(
-        "FedEx capture JSON not found at tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json")
+    raise AssertionError(
+        "FedEx capture JSON not found at tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"
+    )
 
 
 class _QuietLogger:
@@ -103,7 +113,8 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
     subset = _find_delivered(mapping, batch_size)
 
     if not subset:
-        pytest.skip("No delivered rows found in capture.")
+        raise AssertionError(
+            "No delivered rows found in capture; cannot run delivered classification test")
 
     # Write replays
     replay_dir = tmp_path / "replay"
@@ -139,6 +150,7 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
     for col in OUTPUT_FEDEX_COLUMNS + ["CalculatedStatus"]:
         assert col in df.columns
 
-    # Expect Delivered classification
+    # Expect Delivered indicator to be set for these rows
     for i in range(len(subset)):
-        assert df.loc[i, "CalculatedStatus"] == "Delivered"
+        assert int(df.loc[i, "IsDelivered"]
+                   ) == 1, f"Row {i} expected IsDelivered==1, got CalculatedStatus={df.loc[i, 'CalculatedStatus']}"

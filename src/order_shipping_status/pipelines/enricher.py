@@ -140,7 +140,42 @@ class Enricher:
                     # import here to avoid circular import at module load
                     from order_shipping_status.api.normalize import _latest_event_ts_utc
 
-                    ts = _latest_event_ts_utc(payload)
+                    # If payload is a batch 'output' object containing multiple
+                    # completeTrackResults, find the one corresponding to this TN
+                    # and compute the latest event timestamp only from that entry.
+                    ts = ""
+                    if isinstance(payload, dict) and "completeTrackResults" in payload:
+                        ctr = payload.get("completeTrackResults")
+                        if isinstance(ctr, list):
+                            matched = None
+                            for cr in ctr:
+                                if not isinstance(cr, dict):
+                                    continue
+                                # direct trackingNumber on the completeTrackResults entry
+                                if str(cr.get("trackingNumber", "")).strip() == tn:
+                                    matched = cr
+                                    break
+                                # or inside nested trackResults/trackingNumberInfo
+                                tr_list = cr.get("trackResults")
+                                if isinstance(tr_list, list):
+                                    for tr in tr_list:
+                                        if not isinstance(tr, dict):
+                                            continue
+                                        tinfo = tr.get(
+                                            "trackingNumberInfo") or {}
+                                        if str(tinfo.get("trackingNumber", "")).strip() == tn:
+                                            matched = cr
+                                            break
+                                if matched:
+                                    break
+                            if matched is not None:
+                                mini = {"output": {
+                                    "completeTrackResults": [matched]}}
+                                ts = _latest_event_ts_utc(mini)
+                    # Fallback to original payload (best-effort)
+                    if not ts:
+                        ts = _latest_event_ts_utc(payload)
+
                     if ts:
                         created_cols.add("LatestEventTimestampUtc")
                         out.at[idx, "LatestEventTimestampUtc"] = ts

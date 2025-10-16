@@ -16,24 +16,42 @@ from order_shipping_status.api.normalize import normalize_fedex
 def raw_capture_path() -> Path:
     """
     Prefer the 10-13 capture file for stalled-replay tests. Allow an override
-    via OSS_FEDEX_CAPTURE. If not present, skip the test.
+    via OSS_FEDEX_CAPTURE. If not present, fail the test so missing fixtures
+    are visible instead of silently skipping.
     """
     env_path = os.getenv("OSS_FEDEX_CAPTURE")
     if env_path:
         p = Path(env_path)
         if p.exists():
             return p
+        # Env var was explicitly set but file missing: fail hard so config issues are visible
+        raise AssertionError(
+            f"OSS_FEDEX_CAPTURE is set but file not found: {env_path}")
 
+    # Resolve candidates relative to the repository root (this file lives under
+    # tests/integration/pipelines). This makes the fixture robust when pytest
+    # changes the current working directory during collection/execution.
+    repo_root = Path(__file__).resolve().parents[3]
     candidates = [
-        Path("tests/data/RAW_TransitIssues_10-13-2025_api_bodies.json"),
+        repo_root / "tests" / "data" / "RAW_TransitIssues_10-13-2025_api_bodies.json",
+        repo_root / "tests" / "data" / "RAW_TransitIssues_10-7-2025_api_bodies.json",
         Path("/mnt/data/RAW_TransitIssues_10-13-2025_api_bodies.json"),
+        Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
     ]
     for p in candidates:
         if p.exists():
             return p
 
-    pytest.skip(
-        "FedEx 10-13 capture JSON not found. Place tests/data/RAW_TransitIssues_10-13-2025_api_bodies.json or set OSS_FEDEX_CAPTURE."
+    # Also look for any RAW_TransitIssues_*.json under tests/data as a last resort
+    data_dir = repo_root / "tests" / "data"
+    if data_dir.exists() and data_dir.is_dir():
+        for match in sorted(data_dir.glob("RAW_TransitIssues_*.json")):
+            if match.exists():
+                return match
+
+    # No env var set and no local captures found: fail so missing fixtures are visible
+    raise AssertionError(
+        "FedEx capture JSON not found. Place one of the RAW_TransitIssues JSONs under tests/data/ or set OSS_FEDEX_CAPTURE to point to the file."
     )
 
 
@@ -90,8 +108,7 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
     data = json.loads(raw_capture_path.read_text(encoding="utf-8"))
     mapping = _map_tracking_to_body(data)
     if STALLED_TN not in mapping:
-        pytest.skip(
-            f"Stalled TN {STALLED_TN} not present in capture; skipping.")
+        raise AssertionError(f"Stalled TN {STALLED_TN} not present in capture")
 
     # Materialize only the stalled TN replay
     replay_dir = tmp_path / "replay"
@@ -139,22 +156,4 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
         0] == "Stalled", f"CalculatedReasons did not start with 'Stalled': {reasons!r}"
 
 
-@pytest.fixture(scope="module")
-def raw_capture_path() -> Path:
-    """
-    Provide path to the big capture file. Try project-local first, then /mnt/data.
-    If nothing is present, skip instead of failing hard so the suite remains green.
-    """
-    candidates = [
-        Path("tests/data/RAW_TransitIssues_10-13-2025_api_bodies.json"),
-        Path("tests/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
-        Path("/mnt/data/RAW_TransitIssues_10-13-2025_api_bodies.json"),
-        Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    pytest.skip(
-        "FedEx capture JSON not found locally. "
-        "Place one of {10-13,10-7} files under tests/data/ or /mnt/data to run replay tests."
-    )
+# end of file

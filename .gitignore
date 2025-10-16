@@ -207,3 +207,10 @@ marimo/_lsp/
 __marimo__/
 
 # excel
+
+# Temporary workbooks and replay artifacts created by local tools
+tmp_*.xlsx
+tmp_*/
+tmp_snap_*
+tmp_replay*
+order_shipping_status_snap_replay_*/
