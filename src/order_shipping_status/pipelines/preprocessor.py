@@ -30,7 +30,14 @@ class Preprocessor:
         return prior_sun, prior_sat
 
     def _drop_first_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df if df.shape[1] == 0 else df.iloc[:, 1:].copy()
+        # Always drop the first column when present. Input files typically
+        # have an extraneous index/placeholder column; dropping it keeps the
+        # downstream schema consistent.
+        if df.shape[1] <= 1:
+            # If there are zero or one columns, returning an empty frame is
+            # safer than returning the original with an unwanted leading col.
+            return df.iloc[:, 1:].copy()
+        return df.iloc[:, 1:].copy()
 
     def _filter_by_prior_week(self, df: pd.DataFrame) -> pd.DataFrame:
         if not self.enable_date_filter:
