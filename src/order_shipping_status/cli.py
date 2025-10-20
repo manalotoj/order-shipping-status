@@ -56,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write normalized sidecar JSON per tracking number to this directory.",
     )
+    p.add_argument(
+        "--dump-api-bodies",
+        type=Path,
+        default=None,
+        help="Path to write a single JSON file containing raw API response bodies (appends per-run).",
+    )
     # NEW: allow disabling the date filter used by the Preprocessor
     p.add_argument(
         "--skip-date-filter",
@@ -135,7 +141,8 @@ def main(argv: list[str] | None = None) -> int:
             token_url=token_url,
         )
         cfg = FedExConfig(base_url=base_url)
-        client = FedExClient(auth, cfg, transport=RequestsTransport())
+        client = FedExClient(auth, cfg, transport=RequestsTransport(
+        ), save_bodies_path=args.dump_api_bodies)
         normalizer = normalize_fedex
         logger.info("Live FedEx API enabled (base=%s)", base_url)
 

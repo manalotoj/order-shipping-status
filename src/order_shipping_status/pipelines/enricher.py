@@ -102,6 +102,34 @@ class Enricher:
         # Track which columns we create so we can clean NaNs to "" afterwards
         created_cols: set[str] = set()
 
+        # If the client supports batch fetching, perform a single batched request
+        batch_payloads: dict[str, dict] = {}
+        try:
+            if hasattr(self.client, "fetch_batch"):
+                # Build list of tracking numbers to query (preserve original index mapping)
+                tns: list[str] = []
+                tn_by_idx: dict[int, str] = {}
+                carrier_map: dict[str, str] = {}
+                for idx, row in out.iterrows():
+                    raw_tn = row.get("Tracking Number", None)
+                    raw_carrier = row.get("Carrier Code", None)
+                    if _is_blank(raw_tn):
+                        continue
+                    tn = str(raw_tn).strip()
+                    tns.append(tn)
+                    tn_by_idx[idx] = tn
+                    if not _is_blank(raw_carrier):
+                        carrier_map[tn] = str(raw_carrier).strip()
+
+                if tns:
+                    try:
+                        batch_payloads = self.client.fetch_batch(
+                            tns, carrier_map=carrier_map)
+                    except Exception:
+                        batch_payloads = {}
+        except Exception:
+            batch_payloads = {}
+
         for idx, row in out.iterrows():
             raw_tn = row.get("Tracking Number", None)
             raw_carrier = row.get("Carrier Code", None)
@@ -115,12 +143,17 @@ class Enricher:
             else:
                 carrier = str(raw_carrier).strip()
 
-            try:
-                payload = self._fetch_payload(tn, carrier)
-            except Exception as ex:
-                self._safe_log(
-                    "warning", "Replay fetch failed for %s/%s: %s", carrier, tn, ex)
-                continue
+            # Prefer batch payload when available
+            payload = {}
+            if tn in batch_payloads:
+                payload = batch_payloads.get(tn, {}) or {}
+            else:
+                try:
+                    payload = self._fetch_payload(tn, carrier)
+                except Exception as ex:
+                    self._safe_log(
+                        "warning", "fetch failed for %s/%s: %s", carrier, tn, ex)
+                    continue
 
             try:
                 cols = self._normalize(payload, tn, carrier)
