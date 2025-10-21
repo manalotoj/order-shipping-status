@@ -237,24 +237,23 @@ class WorkbookProcessor:
                 stalled.to_excel(xw, sheet_name="Stalled",
                                  index=False, na_rep="")
 
-                # 5) Processed
-                df_out.to_excel(xw, sheet_name="Processed",
-                                index=False, na_rep="")
-
-                # 6) Marker
+                # 5) Marker
+                # Intentionally do NOT write a 'Processed' sheet to avoid
+                # duplication with 'All Issues' and reduce workbook size.
                 marker.to_excel(xw, sheet_name="Marker", index=False)
 
     def _postprocess_workbook(self, processed_path: Path) -> None:
         try:
             wb = load_workbook(processed_path)
-            if "Processed" in wb.sheetnames:
-                ws = wb["Processed"]
-                # Find the column index for 'CalculatedReasons' (1-indexed)
+            # Normalize CalculatedReasons to explicit empty-string cells on any
+            # sheet that contains that header (we no longer write a 'Processed'
+            # sheet by default).
+            for name in wb.sheetnames:
+                ws = wb[name]
                 header = [c.value for c in next(
                     ws.iter_rows(min_row=1, max_row=1))]
                 if "CalculatedReasons" in header:
                     col_idx = header.index("CalculatedReasons") + 1
-                    # Iterate data rows and replace None with explicit empty-string cells
                     for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
                         cell = row[0]
                         if cell.value is None:

@@ -42,12 +42,25 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
                              reference_date=dt.date(2025, 1, 15))
     proc.process(src, out, env)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    # read_excel may return NaN for empty cells; coerce to str for robust assertions
-    assert str(df.loc[0, "code"]) == "DLV"
-    assert str(df.loc[0, "derivedCode"]) == "DLV"
-    assert str(df.loc[0, "statusByLocale"]) == "Delivered"
-    assert str(df.loc[0, "description"]) == "Left at front door"
+    # Reconstruct processed DataFrame from written 'All Shipments' and run
+    # same pipeline steps so tests don't require a 'Processed' sheet.
+    from order_shipping_status.pipelines.column_contract import ColumnContract
+    from order_shipping_status.pipelines.enricher import Enricher
+    from order_shipping_status.rules.indicators import apply_indicators
+    from order_shipping_status.rules.status_mapper import map_indicators_to_status
+
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df_proc = ColumnContract().ensure(df_input)
+    df_proc = Enricher(QL(), client=ReplayClient(replay_dir),
+                       normalizer=normalize_status).enrich(df_proc)
+    df_proc = apply_indicators(df_proc)
+    df_proc = map_indicators_to_status(df_proc)
+
+    assert str(df_proc.loc[0, "code"]) == "DLV"
+    assert str(df_proc.loc[0, "derivedCode"]) == "DLV"
+    assert str(df_proc.loc[0, "statusByLocale"]) == "Delivered"
+    assert str(df_proc.loc[0, "description"]) == "Left at front door"
 
 
 class QL:

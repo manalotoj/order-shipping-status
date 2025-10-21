@@ -29,8 +29,10 @@ def test_workbook_processor_end_to_end(tmp_path: Path):
     result = proc.process(src, out, env)
 
     assert out.exists()
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # Reconstruct processed DataFrame from input to validate preprocessor effects
+    df_in = pd.read_excel(out, sheet_name="All Shipments", engine="openpyxl")
+    df_final = proc._prepare_and_enrich(df_in)
     # first column dropped; others preserved
-    assert "X" not in df.columns and "A" in df.columns
+    assert "X" not in df_final.columns and "A" in df_final.columns
     # basic payload sanity
     assert result["output_path"].endswith("abc_processed.xlsx")

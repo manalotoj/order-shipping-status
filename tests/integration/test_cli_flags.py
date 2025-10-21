@@ -20,7 +20,9 @@ def test_cli_reference_date_filters(tmp_path: Path):
                    "--reference-date", "2025-01-15"])
     assert code == 0
     processed, _ = derive_output_paths(src)
-    out = pd.read_excel(processed, sheet_name="Processed", engine="openpyxl")
+    # The pipeline no longer writes a full 'Processed' sheet; check the
+    # filtered 'All Issues' sheet which reflects the post-processed subset.
+    out = pd.read_excel(processed, sheet_name="All Issues", engine="openpyxl")
     assert len(out) == 1
 
 
@@ -39,11 +41,12 @@ def test_cli_replay_populates_columns(tmp_path: Path):
                    "Tracking Number": tn, "Carrier Code": "FDX"}]).to_excel(src, index=False)
     rdir = tmp_path / "replay"
     rdir.mkdir()
-    (rdir / f"{tn}.json").write_text(json.dumps({"code": "DLV",
-                                                 "statusByLocale": "Delivered", "description": "ok"}), encoding="utf-8")
+    # Use a non-delivered code so the enriched row appears in the 'All Issues' sheet
+    (rdir / f"{tn}.json").write_text(json.dumps({"code": "OC",
+                                                 "statusByLocale": "Label created", "description": "ok"}), encoding="utf-8")
     code = run_cli([str(src), "--no-console", "--reference-date",
                    "2025-01-15", "--replay-dir", str(rdir)])
     assert code == 0
     processed, _ = derive_output_paths(src)
-    out = pd.read_excel(processed, sheet_name="Processed", engine="openpyxl")
-    assert out.loc[0, "code"] == "DLV"
+    out = pd.read_excel(processed, sheet_name="All Issues", engine="openpyxl")
+    assert out.loc[0, "code"] == "OC"

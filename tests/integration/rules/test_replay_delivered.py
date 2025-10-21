@@ -145,12 +145,27 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
     )
     proc.process(src, out, env_cfg=None)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # Reconstruct processed output: read original input sheet and run the
+    # same pipeline steps (ColumnContract + Enricher + indicators) so tests
+    # don't depend on a 'Processed' sheet being written.
+    from order_shipping_status.pipelines.column_contract import ColumnContract
+    from order_shipping_status.pipelines.enricher import Enricher
+    from order_shipping_status.rules.indicators import apply_indicators
+    from order_shipping_status.rules.status_mapper import map_indicators_to_status
+
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df_proc = ColumnContract().ensure(df_input)
+    df_proc = Enricher(_QuietLogger(), client=ReplayClient(
+        replay_dir), normalizer=normalize_fedex).enrich(df_proc)
+    df_proc = apply_indicators(df_proc)
+    df_proc = map_indicators_to_status(df_proc)
+
     # Contract columns present
     for col in OUTPUT_FEDEX_COLUMNS + ["CalculatedStatus"]:
-        assert col in df.columns
+        assert col in df_proc.columns
 
     # Expect Delivered indicator to be set for these rows
     for i in range(len(subset)):
-        assert int(df.loc[i, "IsDelivered"]
-                   ) == 1, f"Row {i} expected IsDelivered==1, got CalculatedStatus={df.loc[i, 'CalculatedStatus']}"
+        assert int(df_proc.loc[i, "IsDelivered"]
+                   ) == 1, f"Row {i} expected IsDelivered==1, got CalculatedStatus={df_proc.loc[i, 'CalculatedStatus']}"

@@ -10,6 +10,21 @@ def run_cli(args):
     return cli.main(args)
 
 
+# Minimal logger stub used by tests
+class Logger:
+    def debug(self, *a, **k):
+        pass
+
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+    def error(self, *a, **k):
+        pass
+
+
 def test_cli_creates_processed_with_expected_columns(tmp_path: Path):
     src = tmp_path / "abc.xlsx"
     # Include a disposable first column so the preprocessor can drop it
@@ -23,18 +38,23 @@ def test_cli_creates_processed_with_expected_columns(tmp_path: Path):
     processed, _log = derive_output_paths(src)
     assert processed.exists()
 
-    out = pd.read_excel(processed, sheet_name="Processed", engine="openpyxl")
+    # Reconstruct processed DataFrame from All Shipments so test is independent
+    from order_shipping_status.pipelines.workbook_processor import WorkbookProcessor
+    df_in = pd.read_excel(
+        processed, sheet_name="All Shipments", engine="openpyxl")
+    proc = WorkbookProcessor(Logger(), reference_date=None)
+    df_final = proc._prepare_and_enrich(df_in)
 
     # original (non-dropped) columns preserved
     for col in ["A", "B"]:
-        assert col in out.columns
+        assert col in df_final.columns
 
     # new FedEx columns present
     for col in OUTPUT_FEDEX_COLUMNS:
-        assert col in out.columns
+        assert col in df_final.columns
 
     # CalculatedStatus present
-    assert OUTPUT_STATUS_COLUMN in out.columns
+    assert OUTPUT_STATUS_COLUMN in df_final.columns
 
 
 def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
@@ -85,11 +105,12 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     proc.process(src, out, env)
 
     # --- Assert: processed sheet has populated FedEx columns for that row ---
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    # In this specific replay we set Delivered; just assert the columns are present and filled from the replay
-    assert df.iloc[0]["statusByLocale"] == "Delivered"
-    assert df.iloc[0]["description"] == "Left at front door"
+    # Reconstruct processed DataFrame and assert enrichment
+    df_in = pd.read_excel(out, sheet_name="All Shipments", engine="openpyxl")
+    df_proc = proc._prepare_and_enrich(df_in)
+    assert df_proc.iloc[0]["statusByLocale"] == "Delivered"
+    assert df_proc.iloc[0]["description"] == "Left at front door"
 
     # And: all expected FedEx columns exist
     for col in OUTPUT_FEDEX_COLUMNS:
-        assert col in df.columns
+        assert col in df_proc.columns

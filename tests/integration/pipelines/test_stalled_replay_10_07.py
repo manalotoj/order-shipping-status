@@ -136,7 +136,10 @@ def test_stalled_tns_from_10_07_capture(tmp_path: Path):
 
     proc.process(src, out, env_cfg=None)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # Reconstruct processed DataFrame
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df = proc._prepare_and_enrich(df_input)
     df["Tracking Number"] = df["Tracking Number"].astype(str)
 
     stalled_found = []

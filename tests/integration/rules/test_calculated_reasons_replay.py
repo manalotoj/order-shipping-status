@@ -140,7 +140,7 @@ def test_calculated_reasons_matches_indicators(tmp_path: Path, raw_capture_path:
     proc.process(src, out, env_cfg=None)
 
     # Validate output
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    df = pd.read_excel(out, sheet_name="All Issues", engine="openpyxl")
     # Normalize pandas' NaN -> empty-string for text columns so assertions are stable.
     # Use pandas string dtype to avoid numeric NaN -> 'nan' when casting to str.
     if "CalculatedReasons" in df.columns:

@@ -51,11 +51,11 @@ def test_pretransit_sheet_has_rows(tmp_path):
     proc.process(src, out, env_cfg=None)
 
     # Read sheets
-    processed = _read_sheet(out, "Processed")
+    all_issues = _read_sheet(out, "All Issues")
     pre = _read_sheet(out, "PreTransit")
 
-    # PreTransit should exist and have the same number of columns as Processed
-    assert list(pre.columns) == list(processed.columns)
+    # PreTransit should exist and have the same number of columns as All Issues (processed)
+    assert list(pre.columns) == list(all_issues.columns)
     # Since enrichment is not wired to API in this test, pre sheet may be empty or contain the row
     # The key is that the PreTransit sheet exists.
     assert "PreTransit" in [s for s in pd.ExcelFile(
@@ -82,9 +82,9 @@ def test_pretransit_sheet_empty_when_no_pretransit(tmp_path):
     proc.process(src, out, env_cfg=None)
 
     # Read sheets
-    processed = _read_sheet(out, "Processed")
+    all_issues = _read_sheet(out, "All Issues")
     pre = _read_sheet(out, "PreTransit")
 
     # PreTransit sheet should exist and be empty (only headers) or have zero rows
-    assert list(pre.columns) == list(processed.columns)
+    assert list(pre.columns) == list(all_issues.columns)
     assert len(pre) == 0

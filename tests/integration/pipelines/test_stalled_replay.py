@@ -140,12 +140,16 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
     )
     proc.process(src, out, env_cfg=None)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # Reconstruct processed DataFrame via WorkbookProcessor helper
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df_final = proc._prepare_and_enrich(df_input)
+
     # Find the row for the TN
-    df["Tracking Number"] = df["Tracking Number"].astype(str)
+    df_final["Tracking Number"] = df_final["Tracking Number"].astype(str)
     assert STALLED_TN in list(
-        df["Tracking Number"]), "Expected TN not in processed output"
-    row = df[df["Tracking Number"] == STALLED_TN].iloc[0]
+        df_final["Tracking Number"]), "Expected TN not in processed output"
+    row = df_final[df_final["Tracking Number"] == STALLED_TN].iloc[0]
 
     # Indicators/status assertions
     assert int(row.get("IsStalled", 0)

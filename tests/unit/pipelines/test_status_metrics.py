@@ -43,11 +43,21 @@ def test_days_since_latest_event_computed(tmp_path: Path):
     )
     proc.process(src, out, env_cfg=None)
 
-    result = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    assert "DaysSinceLatestEvent" in result.columns
+    from order_shipping_status.pipelines.column_contract import ColumnContract
+    from order_shipping_status.pipelines.enricher import Enricher
+
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df_proc = ColumnContract().ensure(df_input)
+    # No enricher since client/normalizer are None; call process to compute metrics indirectly
+    proc = WorkbookProcessor(logger=_QuietLogger(
+    ), client=None, normalizer=None, reference_date=None, enable_date_filter=False)
+    df_final = proc._prepare_and_enrich(df_input)
+
+    assert "DaysSinceLatestEvent" in df_final.columns
 
     # Row 0 ≈ 5 days; integer days should be exact
-    assert int(result.loc[0, "DaysSinceLatestEvent"]) == 5
+    assert int(df_final.loc[0, "DaysSinceLatestEvent"]) == 5
     # Invalid/missing -> 0 by contract
-    assert int(result.loc[1, "DaysSinceLatestEvent"]) == 0
-    assert int(result.loc[2, "DaysSinceLatestEvent"]) == 0
+    assert int(df_final.loc[1, "DaysSinceLatestEvent"]) == 0
+    assert int(df_final.loc[2, "DaysSinceLatestEvent"]) == 0

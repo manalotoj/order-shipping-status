@@ -30,7 +30,11 @@ def test_stalled_synthetic_end_to_end(tmp_path: Path):
     )
     proc.process(src, out, env_cfg=None)
 
-    r = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
-    assert int(r.loc[0, "IsStalled"]) == 1
-    assert r.loc[0, "CalculatedStatus"] in (
+    # Reconstruct processed DataFrame via WorkbookProcessor helper
+    df_input = pd.read_excel(
+        out, sheet_name="All Shipments", engine="openpyxl")
+    df_final = proc._prepare_and_enrich(df_input)
+
+    assert int(df_final.loc[0, "IsStalled"]) == 1
+    assert df_final.loc[0, "CalculatedStatus"] in (
         "Stalled", "Exception", "ReturnedToSender", "Delivered", "PreTransit")

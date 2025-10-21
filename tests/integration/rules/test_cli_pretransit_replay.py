@@ -156,7 +156,8 @@ def test_pretransit_rows_classified(tmp_path: Path, replay_dir_with_listed_tns: 
     )
     proc.process(src, out, env_cfg=None)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # The processor no longer writes a full 'Processed' sheet; use 'All Issues'
+    df = pd.read_excel(out, sheet_name="All Issues", engine="openpyxl")
 
     # Contract columns present
     for col in OUTPUT_FEDEX_COLUMNS + ["CalculatedStatus"]:

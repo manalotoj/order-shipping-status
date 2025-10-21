@@ -91,7 +91,8 @@ def test_tn_snapshot_matches(tmp_path: Path, tn: str):
 
     proc.process(src, out, env_cfg=None)
 
-    df = pd.read_excel(out, sheet_name="Processed", engine="openpyxl")
+    # The processor no longer writes a 'Processed' sheet; use 'All Issues'
+    df = pd.read_excel(out, sheet_name="All Issues", engine="openpyxl")
     df["Tracking Number"] = df["Tracking Number"].astype(str)
     row = df[df["Tracking Number"] == tn].iloc[0]
 
