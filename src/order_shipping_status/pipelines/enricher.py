@@ -155,6 +155,11 @@ class Enricher:
                         "warning", "fetch failed for %s/%s: %s", carrier, tn, ex)
                     continue
 
+            # If payload is empty, log for visibility
+            if not payload:
+                self._safe_log(
+                    "warning", "empty payload for %s/%s", carrier, tn)
+
             try:
                 cols = self._normalize(payload, tn, carrier)
             except Exception as ex:
@@ -166,6 +171,58 @@ class Enricher:
             for k, v in cols.items():
                 created_cols.add(k)
                 out.at[idx, k] = v
+
+            # Backfill core FedEx fields (code/derivedCode/statusByLocale/description)
+            # when the normalizer didn't provide them. Use the same helpers as
+            # the normalizer as a best-effort fallback.
+            try:
+                missing_core = False
+                for core_col in ("code", "statusByLocale", "description"):
+                    if core_col not in cols or _is_blank(cols.get(core_col, "")):
+                        missing_core = True
+                        break
+
+                if missing_core:
+                    # Import helpers locally to avoid circular import at module load
+                    from order_shipping_status.api.normalize import (
+                        _from_latest_status_detail,
+                        _from_scan_events,
+                        _from_flat,
+                    )
+
+                    c, d, s, desc = "", "", "", ""
+                    try:
+                        c, d, s, desc = _from_latest_status_detail(payload)
+                    except Exception:
+                        c, d, s, desc = "", "", "", ""
+
+                    if not c and not s:
+                        try:
+                            c, d, s, desc = _from_scan_events(payload)
+                        except Exception:
+                            c, d, s, desc = "", "", "", ""
+
+                    if not c and not s:
+                        try:
+                            c, d, s, desc = _from_flat(payload)
+                        except Exception:
+                            c, d, s, desc = "", "", "", ""
+
+                    if c:
+                        created_cols.add("code")
+                        out.at[idx, "code"] = c
+                    if d:
+                        created_cols.add("derivedCode")
+                        out.at[idx, "derivedCode"] = d
+                    if s:
+                        created_cols.add("statusByLocale")
+                        out.at[idx, "statusByLocale"] = s
+                    if desc:
+                        created_cols.add("description")
+                        out.at[idx, "description"] = desc
+            except Exception:
+                # best-effort; don't fail enrichment on backfill errors
+                pass
 
             # Backfill LatestEventTimestampUtc from raw payload if normalizer did not provide it
             if "LatestEventTimestampUtc" not in cols:

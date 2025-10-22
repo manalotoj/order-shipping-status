@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         from .api.fedex import FedExClient, FedExAuth, FedExConfig
         from .api.transport import RequestsTransport
         from .api.normalize import normalize_fedex
+        from .api.fedex_writer import FedExWriter
 
         token_url = getattr(env_cfg, "FEDEX_TOKEN_URL",
                             None) or "https://apis.fedex.com/oauth/token"
@@ -141,8 +142,16 @@ def main(argv: list[str] | None = None) -> int:
             token_url=token_url,
         )
         cfg = FedExConfig(base_url=base_url)
-        client = FedExClient(auth, cfg, transport=RequestsTransport(
-        ), save_bodies_path=args.dump_api_bodies)
+        client_raw = FedExClient(auth, cfg, transport=RequestsTransport())
+
+        writer = None
+        if args.dump_api_bodies:
+            writer = FedExWriter(path=args.dump_api_bodies)
+
+        # Use the shared adapter module (keeps CLI small and allows reuse)
+        from .api.fedex_helper import FedexHelper
+
+        client = FedexHelper(client_raw, writer=writer, logger=logger)
         normalizer = normalize_fedex
         logger.info("Live FedEx API enabled (base=%s)", base_url)
 

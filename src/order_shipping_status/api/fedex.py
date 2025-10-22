@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
-import base64
-import time
-
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, List
-import base64
+from typing import Any, Dict, Optional
 import json
 import time
+import logging
 
 from .transport import RequestsTransport
 
@@ -28,136 +23,198 @@ class FedExAuth:
 
 
 class FedExClient:
-    """FedEx client with batched POST support for /track/v1/trackingnumbers.
+    """Minimal FedEx client.
 
-    - Acquires OAuth access token using client credentials (cached in-memory).
-    - Supports `fetch_batch(tracking_numbers)` which posts up to 30 TNs per request.
-    - Optionally persists raw response bodies into a single JSON file (append semantics).
+    Responsibilities:
+    - authenticate(): acquires an OAuth token using client_id/client_secret in
+      the x-www-form-urlencoded body (no Basic auth header).
+    - post_tracking(body, access_token=None): POST a single tracking request
+      body (which may include up to 30 tracking numbers). The caller is
+      responsible for batching and persistence.
+
+    The client uses RequestsTransport for HTTP operations so it fits the
+    project's transport abstraction.
     """
 
-    def __init__(self, auth: FedExAuth, cfg: FedExConfig, transport: Optional[RequestsTransport] = None, *, save_bodies_path: Optional[Path] = None):
+    def __init__(
+        self,
+        auth: FedExAuth,
+        cfg: FedExConfig,
+        transport: Optional[RequestsTransport] = None,
+        *,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self.auth = auth
         self.cfg = cfg
         self.transport = transport or RequestsTransport()
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
-        self._saved_bodies: List[dict] = []
-        self._save_bodies_path = Path(
-            save_bodies_path) if save_bodies_path is not None else None
+        self.logger: logging.Logger = logger or logging.getLogger(
+            "order_shipping_status.api.fedex"
+        )
 
-    def _ensure_token(self) -> None:
+    def authenticate(self) -> Optional[str]:
+        """Ensure an access token is available and return it.
+
+        Acquires token by POSTing application/x-www-form-urlencoded with
+        grant_type=client_credentials, client_id and client_secret. Caches
+        token in-memory until expiry.
+        """
         now = time.time()
         if self._token and now < self._token_expires_at - 10:
-            return
+            return self._token
 
-        data = {"grant_type": "client_credentials"}
-        auth_header = base64.b64encode(
-            f"{self.auth.client_id}:{self.auth.client_secret}".encode()).decode()
-        headers = {"Authorization": f"Basic {auth_header}",
-                   "Content-Type": "application/x-www-form-urlencoded"}
-        resp = self.transport.post(
-            self.auth.token_url, headers=headers, data=data)
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": self.auth.client_id,
+            "client_secret": self.auth.client_secret,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        try:
+            self.logger.debug(
+                "Requesting FedEx OAuth token (form body) from %s",
+                self.auth.token_url,
+            )
+        except Exception:
+            pass
+
+        try:
+            resp = self.transport.post(
+                self.auth.token_url, headers=headers, data=data)
+        except Exception as ex:  # network/transport error
+            try:
+                self.logger.warning("FedEx token request failed: %s", ex)
+            except Exception:
+                pass
+            self._token = None
+            self._token_expires_at = 0.0
+            return None
+
+        try:
+            status = resp.status_code
+        except Exception:
+            status = None
+
         try:
             resp.raise_for_status()
             j = resp.json()
             self._token = j.get("access_token")
             expires_in = int(j.get("expires_in", 3600))
             self._token_expires_at = time.time() + expires_in
-        except Exception:
+            try:
+                self.logger.debug(
+                    "FedEx token acquired (expires_in=%s status=%s)", expires_in, status
+                )
+            except Exception:
+                pass
+            return self._token
+        except Exception as ex:
+            resp_text = None
+            try:
+                resp_text = resp.text
+            except Exception:
+                resp_text = None
+            try:
+                self.logger.warning(
+                    "FedEx token request returned error status=%s exception=%s response_body=%s",
+                    status,
+                    ex,
+                    (resp_text[:2000] + "...") if resp_text and len(
+                        resp_text) > 2000 else resp_text,
+                )
+            except Exception:
+                pass
             self._token = None
             self._token_expires_at = 0.0
-
-    def _persist_bodies(self) -> None:
-        if not self._save_bodies_path:
-            return
-        try:
-            self._save_bodies_path.parent.mkdir(parents=True, exist_ok=True)
-            existing: List[dict] = []
-            if self._save_bodies_path.exists():
-                try:
-                    existing = json.loads(
-                        self._save_bodies_path.read_text(encoding="utf-8"))
-                    if not isinstance(existing, list):
-                        existing = []
-                except Exception:
-                    existing = []
-            existing.extend(self._saved_bodies)
-            self._save_bodies_path.write_text(json.dumps(
-                existing, indent=2, ensure_ascii=False), encoding="utf-8")
-            # Clear saved bodies after persisting so subsequent writes don't duplicate
-            self._saved_bodies = []
-        except Exception:
-            # best-effort; ignore failures to persist
-            pass
+            return None
 
     def _endpoint_for_tracking(self) -> str:
         base = self.cfg.base_url.rstrip("/")
-        # If user passed e.g. https://apis.fedex.com/track, append v1/trackingnumbers
         if "trackingnumbers" in base or "/v1/" in base:
             return base
         return base + "/v1/trackingnumbers"
 
-    def fetch_batch(self, tracking_numbers: List[str], carrier_map: Optional[Dict[str, str]] = None) -> Dict[str, dict]:
-        """Fetch tracking payloads for up to len(tracking_numbers) TNs.
+    def post_tracking(self, body: Dict[str, Any], access_token: Optional[str] = None) -> Dict[str, Any]:
+        """POST a single tracking request body to FedEx Track API and return parsed JSON.
 
-        Returns a dict mapping tracking_number -> response_payload (the full JSON body for the batch
-        response that includes that TN). If multiple batches are required (len>30), performs multiple
-        POSTs and merges results.
+        - `body` should follow the FedEx Track API shape (it may contain up to 30 TNs).
+        - If `access_token` is provided, it will be used. Otherwise the client will
+          call `authenticate()` and use the cached token.
+        - The function returns the parsed JSON response (or an empty dict on error).
         """
-        if not tracking_numbers:
+        token = access_token or self.authenticate()
+        if not token:
             return {}
 
-        # Ensure token available
-        self._ensure_token()
-        if not self._token:
-            return {tn: {} for tn in tracking_numbers}
-
-        headers = {"Authorization": f"Bearer {self._token}",
+        headers = {"Authorization": f"Bearer {token}",
                    "Content-Type": "application/json"}
         endpoint = self._endpoint_for_tracking()
 
-        # Work in chunks of 30
-        out: Dict[str, dict] = {}
-        CHUNK = 30
-        for i in range(0, len(tracking_numbers), CHUNK):
-            chunk = tracking_numbers[i:i+CHUNK]
-            # Build request body per FedEx track API minimal shape
-            tracking_info = []
-            for tn in chunk:
-                info = {"trackingNumberInfo": {"trackingNumber": tn}}
-                # if carrier_map provided, include carrier-specific info if non-empty
-                if carrier_map and carrier_map.get(tn):
-                    info["carrierCode"] = carrier_map.get(tn)
-                tracking_info.append(info)
+        try:
+            body_text = json.dumps(body, ensure_ascii=False)
+        except Exception:
+            body_text = str(body)
 
-            body = {"trackingInfo": tracking_info,
-                    "includeDetailedScans": True}
+        try:
+            self.logger.debug(
+                "FedEx POST endpoint=%s request_body=%s",
+                endpoint,
+                (body_text[:4000] +
+                 "...") if len(body_text) > 4000 else body_text,
+            )
+        except Exception:
+            pass
 
+        try:
+            resp = self.transport.post(endpoint, headers=headers, json=body)
             try:
-                resp = self.transport.post(
-                    endpoint, headers=headers, json=body)
+                status = resp.status_code
+            except Exception:
+                status = None
+            try:
                 resp.raise_for_status()
                 j = resp.json()
-            except Exception:
-                j = {}
-
-            # Save raw body for optional persistence
+                try:
+                    resp_text = json.dumps(j, ensure_ascii=False)
+                except Exception:
+                    try:
+                        resp_text = resp.text
+                    except Exception:
+                        resp_text = str(j)
+                try:
+                    self.logger.debug(
+                        "FedEx POST endpoint=%s status=%s response_body=%s",
+                        endpoint,
+                        status,
+                        (resp_text[:4000] + "...") if resp_text and len(
+                            resp_text) > 4000 else resp_text,
+                    )
+                except Exception:
+                    pass
+                return j
+            except Exception as ex:
+                resp_text = None
+                try:
+                    resp_text = resp.text
+                except Exception:
+                    resp_text = None
+                try:
+                    self.logger.warning(
+                        "FedEx POST endpoint=%s returned error status=%s exception=%s response_body=%s",
+                        endpoint,
+                        status,
+                        ex,
+                        (resp_text[:4000] + "...") if resp_text and len(
+                            resp_text) > 4000 else resp_text,
+                    )
+                except Exception:
+                    pass
+                return {}
+        except Exception as ex:
             try:
-                self._saved_bodies.append(j)
+                self.logger.warning(
+                    "FedEx transport POST failed for endpoint=%s: %s", endpoint, ex)
             except Exception:
                 pass
-
-            # Map each tn in the chunk to the batch response (normalizer will narrow)
-            for tn in chunk:
-                out[tn] = j
-
-            # Persist saved bodies incrementally to avoid losing them on long runs
-            self._persist_bodies()
-
-        return out
-
-    # Backwards-compatible single-TN fetch that delegates to fetch_batch
-    def fetch_status(self, tracking_number: str, carrier_code: Optional[str] = None) -> Dict[str, Any]:
-        res = self.fetch_batch([tracking_number], carrier_map={
-                               tracking_number: carrier_code} if carrier_code else None)
-        return res.get(tracking_number, {})
+            return {}

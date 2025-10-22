@@ -149,7 +149,14 @@ class WorkbookProcessor:
     def _build_marker(self, input_path: Path, processed_path: Path, now_utc: str, has_creds: bool, df_in: pd.DataFrame, df_out: pd.DataFrame) -> pd.DataFrame:
         api_bodies = None
         try:
-            if hasattr(self.client, "_save_bodies_path") and self.client._save_bodies_path:
+            # Prefer writer.path exposed by LiveFedExAdapter (writer.path is a Path)
+            if hasattr(self.client, "_writer") and getattr(self.client, "_writer") is not None:
+                try:
+                    api_bodies = str(self.client._writer.path)
+                except Exception:
+                    api_bodies = None
+            # Back-compat: older FedEx client used _save_bodies_path
+            elif hasattr(self.client, "_save_bodies_path") and self.client._save_bodies_path:
                 api_bodies = str(self.client._save_bodies_path)
         except Exception:
             api_bodies = None
