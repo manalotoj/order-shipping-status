@@ -17,7 +17,6 @@ INDICATOR_COLS: tuple[str, ...] = (
     "HasException",
     "IsRTS",
     "IsStalled",
-    "IsDamaged",
 )
 
 

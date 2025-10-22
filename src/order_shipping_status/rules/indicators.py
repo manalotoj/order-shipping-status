@@ -7,7 +7,6 @@ import pandas as pd
 INDICATOR_COLS: tuple[str, ...] = (
     "IsPreTransit",
     "IsDelivered",
-    "IsDamaged",
     "HasException",
     "IsRTS",
     "IsStalled",
@@ -115,23 +114,6 @@ def _is_rts_text(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Seri
     return c | s | d
 
 
-def _is_damaged(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Series:
-    """Damaged if there is an exception and status/description contains 'DAMAGED' or 'MULTIPLE TRACKING LABELS'.
-
-    The function expects uppercase status/desc series (as produced by _get_text_cols).
-    Only consider records that have exception-like codes/texts.
-    """
-    # Base exception detection from codes/texts
-    has_exc = code.isin(_EXCEPTION_CODES)
-
-    # Look for keywords in status/description
-    patt = r"DAMAGED|MULTIPLE\s+TRACKING\s+LABELS"
-    s = status.str.contains(patt, case=False, regex=True)
-    d = desc.str.contains(patt, case=False, regex=True)
-
-    return (has_exc & (s | d))
-
-
 def apply_indicators(df: pd.DataFrame, *, stalled_threshold_days: int = 4) -> pd.DataFrame:
     """
     Create/overwrite indicator columns:
@@ -176,14 +158,10 @@ def apply_indicators(df: pd.DataFrame, *, stalled_threshold_days: int = 4) -> pd
 
     exc = _has_exception(code, status, desc)
 
-    # Damaged detection: must be an exception and mention DAMAGED or MULTIPLE TRACKING LABELS
-    damaged = _is_damaged(code, status, desc)
-
     # Materialize as 0/1 int64, robust to NaN
     out["IsPreTransit"] = pre.astype("int64")
     out["IsDelivered"] = dlv.astype("int64")
     out["HasException"] = exc.astype("int64")
-    out["IsDamaged"] = damaged.astype("int64")
     out["IsRTS"] = rts.astype("int64")
 
     # Terminal (Delivered or RTS)
