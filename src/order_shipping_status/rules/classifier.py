@@ -8,6 +8,7 @@ import pandas as pd
 PRETRANSIT = "PreTransit"
 DELIVERED = "Delivered"
 EXCEPTION = "Exception"
+DAMAGED = "Damaged"
 
 # -------- Text hints (lowercased) --------
 _PRETRANSIT_HINTS: tuple[str, ...] = (
@@ -29,6 +30,13 @@ _EXCEPTION_HINTS: tuple[str, ...] = (
     "damage",
 )
 
+# Hints specifically used to detect damaged/multiple-labels conditions
+_DAMAGED_HINTS: tuple[str, ...] = (
+    "damage",
+    "damaged",
+    "multiple tracking labels",
+)
+
 # -------- FedEx (commonly observed) codes --------
 # Pre-transit / label created
 # observed for "label created" / pre-advice
@@ -39,7 +47,8 @@ _PRETRANSIT_CODES: set[str] = {"OC", "LP"}
 _DELIVERED_CODES: set[str] = {"DLV", "DL", "DEL"}
 
 # Exception
-_EXCEPTION_CODES: set[str] = {"EXC"}  # grow this list as we see more codes
+_EXCEPTION_CODES: set[str] = {"DE", "SE",
+                              "EX", "EXC"}  # common exception codes
 
 
 def _any_in(text: str, phrases: Iterable[str]) -> bool:
@@ -79,6 +88,21 @@ def classify_row_exception(
     if cu in _EXCEPTION_CODES or du in _EXCEPTION_CODES:
         return True
     return _any_in(status_by_locale, _EXCEPTION_HINTS) or _any_in(description, _EXCEPTION_HINTS)
+
+
+def classify_row_damaged(
+    code: str, derived: str, status_by_locale: str, description: str
+) -> bool:
+    """Detect damaged shipments: require an exception-like code/text AND damaged/multiple-labels hints.
+
+    This mirrors the indicators logic where IsDamaged requires both an exception signal and
+    a textual hint (e.g. 'damaged' or 'multiple tracking labels').
+    """
+    cu, du = (code or "").upper(), (derived or "").upper()
+    # Conservative: require an exception code/derivedCode AND damaged/multiple-labels text
+    if cu in _EXCEPTION_CODES or du in _EXCEPTION_CODES:
+        return _any_in(status_by_locale, _DAMAGED_HINTS) or _any_in(description, _DAMAGED_HINTS)
+    return False
 
 
 def apply_rules(df: pd.DataFrame, *, status_col: str = "CalculatedStatus") -> pd.DataFrame:
