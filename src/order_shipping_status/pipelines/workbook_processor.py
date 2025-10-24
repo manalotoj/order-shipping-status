@@ -56,8 +56,23 @@ class WorkbookProcessor:
         df_in = self._read_input(input_path)
 
         df_out = self._prepare_and_enrich(df_in, sidecar_dir=sidecar_dir)
-        print(
-            df_out[["Tracking Number", "derivedCode", "HasException", "Damaged"]])
+        # Optional: developer preview of a few columns (only those that exist)
+        try:
+            _want = [
+                "Tracking Number",
+                "derivedCode",
+                "IsPreTransit",
+                "IsDelivered",
+                "ScanEventsCount",
+                "LatestEventTimestampUtc",
+                "DaysSinceLatestEvent",
+                "IsStalled",
+            ]
+            _have = [c for c in _want if c in df_out.columns]
+            if _have:
+                print(df_out[_have].to_string(index=False))
+        except Exception:
+            pass
 
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
         has_creds = bool(
@@ -134,9 +149,6 @@ class WorkbookProcessor:
             )
         else:
             df_out["DaysSinceLatestEvent"] = 0
-
-        print(df_out.columns)
-        # print(df_out["latestStatusDetail"].to_dict())
 
         # Optional debug peek (safe): only log if the columns exist
         try:

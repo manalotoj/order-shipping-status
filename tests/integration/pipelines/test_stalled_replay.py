@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -34,9 +35,7 @@ def raw_capture_path() -> Path:
     repo_root = Path(__file__).resolve().parents[3]
     candidates = [
         repo_root / "tests" / "data" / "RAW_TransitIssues_10-13-2025_api_bodies.json",
-        repo_root / "tests" / "data" / "RAW_TransitIssues_10-7-2025_api_bodies.json",
         Path("/mnt/data/RAW_TransitIssues_10-13-2025_api_bodies.json"),
-        Path("/mnt/data/RAW_TransitIssues_10-7-2025_api_bodies.json"),
     ]
     for p in candidates:
         if p.exists():
@@ -135,7 +134,7 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
         logger=_QuietLogger(),
         client=ReplayClient(replay_dir),
         normalizer=normalize_fedex,
-        reference_date=None,
+        reference_date=date(2025, 10, 13),
         enable_date_filter=False,
         stalled_threshold_days=1,
     )

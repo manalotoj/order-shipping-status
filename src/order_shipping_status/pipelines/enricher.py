@@ -40,8 +40,6 @@ class Enricher:
         if hasattr(self.client, "fetch"):
             return self.client.fetch(tracking_number=tn, carrier_code=carrier)
         if hasattr(self.client, "fetch_status"):
-            # ReplayClient.fetch_status historically accepted (tracking_number, carrier_code=None)
-            # Use positional call to avoid mismatched keyword names like 'carrier'.
             return self.client.fetch_status(tn, carrier)
         raise AttributeError(
             "Replay client has neither .fetch nor .fetch_status")
@@ -51,11 +49,9 @@ class Enricher:
         Accept either:
           - dict from normalizer (already column mapping)
           - object with .to_excel_cols()
-        Call with kwargs if supported; otherwise fallback to positional.
         """
         if self.normalizer is None:
             return {}
-
         try:
             result = self.normalizer(
                 payload,
@@ -64,63 +60,200 @@ class Enricher:
                 source="replay",
             )
         except TypeError:
-            # Legacy normalizers that only accept the payload
             result = self.normalizer(payload)
 
-        # object case
         if hasattr(result, "to_excel_cols"):
             return dict(result.to_excel_cols())
-        # dict case
         if isinstance(result, dict):
             return result
-        # unknown; be defensive
         return {}
 
+    # ---------- Helpers to scope a FedEx batch payload to ONE tracking number ----------
+    @staticmethod
+    def _scope_payload_to_tn(payload: dict, tn: str) -> dict:
+        """
+        If payload is a FedEx 'output' body containing many completeTrackResults,
+        return a *new* minimal dict containing only the matching TN. Otherwise return
+        the original payload.
+        """
+        try:
+            if not isinstance(payload, dict):
+                return payload
+            out = payload.get("output", payload)
+            if not isinstance(out, dict):
+                return payload
+            ctr = out.get("completeTrackResults")
+            if not isinstance(ctr, list) or not ctr:
+                return payload
+
+            matched = None
+            for cr in ctr:
+                if not isinstance(cr, dict):
+                    continue
+                # direct match on the container
+                if str(cr.get("trackingNumber", "")).strip() == str(tn):
+                    matched = cr
+                    break
+                # nested trackResults[*].trackingNumberInfo.trackingNumber
+                tr_list = cr.get("trackResults")
+                if isinstance(tr_list, list):
+                    for tr in tr_list:
+                        if not isinstance(tr, dict):
+                            continue
+                        tinfo = tr.get("trackingNumberInfo") or {}
+                        if str(tinfo.get("trackingNumber", "")).strip() == str(tn):
+                            matched = cr
+                            break
+                if matched is not None:
+                    break
+
+            if matched is None:
+                return payload  # best-effort
+
+            # Return a scoped shape that mirrors FedEx 'output' schema
+            return {"output": {"completeTrackResults": [matched]}}
+        except Exception:
+            return payload
+
+    @staticmethod
+    def _latest_status_detail_from_scoped(payload: dict) -> dict:
+        """Return latestStatusDetail dict from a TN-scoped payload (best-effort)."""
+        try:
+            out = payload.get("output", payload)
+            ctr = out.get("completeTrackResults")
+            if not (isinstance(ctr, list) and ctr):
+                return {}
+            tr_list = ctr[0].get("trackResults")
+            if not (isinstance(tr_list, list) and tr_list):
+                return {}
+            lsd = tr_list[0].get("latestStatusDetail")
+            return lsd if isinstance(lsd, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _ancillary_text_from_lsd(lsd: dict) -> str:
+        try:
+            details = lsd.get("ancillaryDetails") or []
+            parts = []
+            if isinstance(details, list):
+                for d in details:
+                    if isinstance(d, dict):
+                        for k in ("reasonDescription", "actionDescription", "reason", "action"):
+                            v = d.get(k)
+                            if v:
+                                parts.append(str(v))
+            return " ".join(parts)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _compute_latest_ts_scan_counts(scoped_payload: dict) -> tuple[str, int, list[str]]:
+        """
+        From a TN-scoped payload, compute:
+          - LatestEventTimestampUtc (ISO, 'Z' suffix)
+          - ScanEventsCount (int)
+          - ScanEventTimestamps (list[str])
+        """
+        from order_shipping_status.api.normalize import _latest_event_ts_utc  # lazy import
+
+        # Count scan events and collect timestamps only within the scoped payload
+        def _collect_scan_dates(obj):
+            dates = []
+            if isinstance(obj, dict):
+                se = obj.get("scanEvents")
+                if isinstance(se, list):
+                    for ev in se:
+                        if isinstance(ev, dict):
+                            for key in ("date", "dateTime", "eventDate"):
+                                v = ev.get(key)
+                                if isinstance(v, str) and "T" in v:
+                                    dates.append(v)
+                outcr = obj.get("completeTrackResults")
+                if isinstance(outcr, list):
+                    for cr in outcr:
+                        if not isinstance(cr, dict):
+                            continue
+                        tr_list = cr.get("trackResults")
+                        if isinstance(tr_list, list):
+                            for tr in tr_list:
+                                if not isinstance(tr, dict):
+                                    continue
+                                se2 = tr.get("scanEvents")
+                                if isinstance(se2, list):
+                                    for ev2 in se2:
+                                        if isinstance(ev2, dict):
+                                            for key in ("date", "dateTime", "eventDate"):
+                                                v2 = ev2.get(key)
+                                                if isinstance(v2, str) and "T" in v2:
+                                                    dates.append(v2)
+            return dates
+
+        def _count_scan_events(obj):
+            count = 0
+            if isinstance(obj, dict):
+                se = obj.get("scanEvents")
+                if isinstance(se, list):
+                    count += len(se)
+                outcr = obj.get("completeTrackResults")
+                if isinstance(outcr, list):
+                    for cr in outcr:
+                        if not isinstance(cr, dict):
+                            continue
+                        tr_list = cr.get("trackResults")
+                        if isinstance(tr_list, list):
+                            for tr in tr_list:
+                                if not isinstance(tr, dict):
+                                    continue
+                                se2 = tr.get("scanEvents")
+                                if isinstance(se2, list):
+                                    count += len(se2)
+            return count
+
+        ts = _latest_event_ts_utc(scoped_payload) or ""
+        scan_ts = _collect_scan_dates(scoped_payload)
+        scan_ct = _count_scan_events(scoped_payload)
+        return ts, int(scan_ct), scan_ts
+
+    # -------------------------------- enrich --------------------------------
     def enrich(self, df: pd.DataFrame, *, sidecar_dir: Optional[Path] = None) -> pd.DataFrame:
         """
-        Expected columns present on input (from Preprocessor + ColumnContract):
-          - "Tracking Number"
-          - "Carrier Code"
-
-        If those columns are missing, this function is a NO-OP.
-        Otherwise, it merges normalized columns row-by-row.
+        Merge normalized API columns row-by-row. Also attach:
+          - raw (if normalizer adds it)
+          - latestStatusDetail (dict)
+          - LatestAncillaryText (str)
+          - LatestEventTimestampUtc (str, 'Z')
+          - ScanEventsCount (int)
+          - ScanEventTimestamps (list[str])
         """
-        # If no key columns, NO-OP (some tests expect exact equality)
         if "Tracking Number" not in df.columns or "Carrier Code" not in df.columns:
             return df.copy()
 
         out = df.copy()
 
-        # Nothing to do without a client+normalizer
         if self.client is None or self.normalizer is None:
             return out
 
-        # Ensure sidecar directory exists if provided
         if sidecar_dir is not None:
             Path(sidecar_dir).mkdir(parents=True, exist_ok=True)
 
-        # Track which columns we create so we can clean NaNs to "" afterwards
         created_cols: set[str] = set()
 
-        # If the client supports batch fetching, perform a single batched request
+        # Optional batch fetch
         batch_payloads: dict[str, dict] = {}
         try:
             if hasattr(self.client, "fetch_batch"):
-                # Build list of tracking numbers to query (preserve original index mapping)
                 tns: list[str] = []
-                tn_by_idx: dict[int, str] = {}
                 carrier_map: dict[str, str] = {}
-                for idx, row in out.iterrows():
-                    raw_tn = row.get("Tracking Number", None)
-                    raw_carrier = row.get("Carrier Code", None)
+                for _, row in out.iterrows():
+                    raw_tn = row.get("Tracking Number")
+                    raw_carrier = row.get("Carrier Code")
                     if _is_blank(raw_tn):
                         continue
                     tn = str(raw_tn).strip()
                     tns.append(tn)
-                    tn_by_idx[idx] = tn
                     if not _is_blank(raw_carrier):
                         carrier_map[tn] = str(raw_carrier).strip()
-
                 if tns:
                     try:
                         batch_payloads = self.client.fetch_batch(
@@ -133,18 +266,15 @@ class Enricher:
         for idx, row in out.iterrows():
             raw_tn = row.get("Tracking Number", None)
             raw_carrier = row.get("Carrier Code", None)
-            # Require a tracking number, but allow missing carrier (pass None)
             if _is_blank(raw_tn):
                 continue
 
             tn = str(raw_tn).strip()
-            if _is_blank(raw_carrier):
-                carrier = None
-            else:
-                carrier = str(raw_carrier).strip()
+            carrier = None if _is_blank(
+                raw_carrier) else str(raw_carrier).strip()
 
-            # Prefer batch payload when available
-            payload = {}
+            # Prefer pre-fetched batch payload
+            payload: dict = {}
             if tn in batch_payloads:
                 payload = batch_payloads.get(tn, {}) or {}
             else:
@@ -155,11 +285,11 @@ class Enricher:
                         "warning", "fetch failed for %s/%s: %s", carrier, tn, ex)
                     continue
 
-            # If payload is empty, log for visibility
             if not payload:
                 self._safe_log(
                     "warning", "empty payload for %s/%s", carrier, tn)
 
+            # Normalize to core excel columns
             try:
                 cols = self._normalize(payload, tn, carrier)
             except Exception as ex:
@@ -167,231 +297,44 @@ class Enricher:
                     "warning", "Normalization failed for %s/%s: %s", carrier, tn, ex)
                 continue
 
-            # Merge normalized columns (strings preferred)
             for k, v in cols.items():
                 created_cols.add(k)
                 out.at[idx, k] = v
 
-        # --- Ensure latestStatusDetail is present (and ancillary text flattened) ---
-        def _extract_lsd_from_raw(raw: object) -> dict:
-            """Safely extract latestStatusDetail dict from the raw FedEx payload."""
+            # ---------- Attach TN-scoped derived fields (always) ----------
+            # Use the raw payload if normalizer propagated it; otherwise use transport payload
+            raw_payload = cols.get("raw", payload) if isinstance(
+                cols, dict) else payload
+            scoped = self._scope_payload_to_tn(raw_payload, tn)
+
+            # latestStatusDetail + ancillary text
             try:
-                if not isinstance(raw, dict):
-                    return {}
-                outp = raw.get("output", raw)
-                if not isinstance(outp, dict):
-                    return {}
-                ctr = outp.get("completeTrackResults")
-                if not isinstance(ctr, list) or not ctr:
-                    return {}
-                tr_list = ctr[0].get("trackResults")
-                if not isinstance(tr_list, list) or not tr_list:
-                    return {}
-                lsd = tr_list[0].get("latestStatusDetail")
-                return lsd if isinstance(lsd, dict) else {}
+                lsd = self._latest_status_detail_from_scoped(scoped)
+                out.at[idx, "latestStatusDetail"] = lsd
+                created_cols.add("latestStatusDetail")
+
+                anc = self._ancillary_text_from_lsd(lsd)
+                out.at[idx, "LatestAncillaryText"] = anc
+                created_cols.add("LatestAncillaryText")
             except Exception:
-                return {}
-
-        def _ancillary_text(lsd: dict) -> str:
-            try:
-                details = lsd.get("ancillaryDetails") or []
-                parts = []
-                if isinstance(details, list):
-                    for d in details:
-                        if isinstance(d, dict):
-                            for k in ("reasonDescription", "actionDescription", "reason", "action"):
-                                v = d.get(k)
-                                if v:
-                                    parts.append(str(v))
-                return " ".join(parts)
-            except Exception:
-                return ""
-
-        try:
-            # Only compute when not already present.
-            if "latestStatusDetail" not in out.columns and "raw" in out.columns:
-                out["latestStatusDetail"] = out["raw"].apply(
-                    _extract_lsd_from_raw)
-            # A flat text column is useful for diagnostics and optional rules.
-            if "latestStatusDetail" in out.columns and "LatestAncillaryText" not in out.columns:
-                out["LatestAncillaryText"] = out["latestStatusDetail"].apply(
-                    _ancillary_text)
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(
-                    "Ancillary extraction skipped due to error: %s", e)
-
-            # Backfill core FedEx fields (code/derivedCode/statusByLocale/description)
-            # when the normalizer didn't provide them. Use the same helpers as
-            # the normalizer as a best-effort fallback.
-            try:
-                missing_core = False
-                for core_col in ("code", "statusByLocale", "description"):
-                    if core_col not in cols or _is_blank(cols.get(core_col, "")):
-                        missing_core = True
-                        break
-
-                if missing_core:
-                    # Import helpers locally to avoid circular import at module load
-                    from order_shipping_status.api.normalize import (
-                        _from_latest_status_detail,
-                        _from_scan_events,
-                        _from_flat,
-                    )
-
-                    c, d, s, desc = "", "", "", ""
-                    try:
-                        c, d, s, desc = _from_latest_status_detail(payload)
-                    except Exception:
-                        c, d, s, desc = "", "", "", ""
-
-                    if not c and not s:
-                        try:
-                            c, d, s, desc = _from_scan_events(payload)
-                        except Exception:
-                            c, d, s, desc = "", "", "", ""
-
-                    if not c and not s:
-                        try:
-                            c, d, s, desc = _from_flat(payload)
-                        except Exception:
-                            c, d, s, desc = "", "", "", ""
-
-                    if c:
-                        created_cols.add("code")
-                        out.at[idx, "code"] = c
-                    if d:
-                        created_cols.add("derivedCode")
-                        out.at[idx, "derivedCode"] = d
-                    if s:
-                        created_cols.add("statusByLocale")
-                        out.at[idx, "statusByLocale"] = s
-                    if desc:
-                        created_cols.add("description")
-                        out.at[idx, "description"] = desc
-            except Exception:
-                # best-effort; don't fail enrichment on backfill errors
+                # keep going; these are optional
                 pass
 
-            # Backfill LatestEventTimestampUtc from raw payload if normalizer did not provide it
-            if "LatestEventTimestampUtc" not in cols:
-                try:
-                    # import here to avoid circular import at module load
-                    from order_shipping_status.api.normalize import _latest_event_ts_utc
-
-                    # If payload is a batch 'output' object containing multiple
-                    # completeTrackResults, find the one corresponding to this TN
-                    # and compute the latest event timestamp only from that entry.
-                    ts = ""
-                    if isinstance(payload, dict) and "completeTrackResults" in payload:
-                        ctr = payload.get("completeTrackResults")
-                        if isinstance(ctr, list):
-                            matched = None
-                            for cr in ctr:
-                                if not isinstance(cr, dict):
-                                    continue
-                                # direct trackingNumber on the completeTrackResults entry
-                                if str(cr.get("trackingNumber", "")).strip() == tn:
-                                    matched = cr
-                                    break
-                                # or inside nested trackResults/trackingNumberInfo
-                                tr_list = cr.get("trackResults")
-                                if isinstance(tr_list, list):
-                                    for tr in tr_list:
-                                        if not isinstance(tr, dict):
-                                            continue
-                                        tinfo = tr.get(
-                                            "trackingNumberInfo") or {}
-                                        if str(tinfo.get("trackingNumber", "")).strip() == tn:
-                                            matched = cr
-                                            break
-                                if matched:
-                                    break
-                            if matched is not None:
-                                mini = {"output": {
-                                    "completeTrackResults": [matched]}}
-                                ts = _latest_event_ts_utc(mini)
-                    # Fallback to original payload (best-effort)
-                    if not ts:
-                        ts = _latest_event_ts_utc(payload)
-
-                    if ts:
-                        created_cols.add("LatestEventTimestampUtc")
-                        out.at[idx, "LatestEventTimestampUtc"] = ts
-                except Exception:
-                    # If helper not available or fails, ignore and continue
-                    pass
-
-            # Count scanEvents in payload (top-level or nested) and expose as ScanEventsCount
+            # LatestEventTimestampUtc / ScanEventsCount / ScanEventTimestamps (TN-scoped)
             try:
-                def _count_scan_events(obj):
-                    count = 0
-                    if isinstance(obj, dict):
-                        se = obj.get("scanEvents")
-                        if isinstance(se, list):
-                            count += len(se)
-                        # nested completeTrackResults -> trackResults -> scanEvents
-                        outcr = obj.get("completeTrackResults")
-                        if isinstance(outcr, list):
-                            for cr in outcr:
-                                if not isinstance(cr, dict):
-                                    continue
-                                tr_list = cr.get("trackResults")
-                                if isinstance(tr_list, list):
-                                    for tr in tr_list:
-                                        if not isinstance(tr, dict):
-                                            continue
-                                        se2 = tr.get("scanEvents")
-                                        if isinstance(se2, list):
-                                            count += len(se2)
-                    return count
-
-                scan_count = _count_scan_events(payload)
+                ts, scan_ct, scan_ts = self._compute_latest_ts_scan_counts(
+                    scoped)
+                if ts:
+                    out.at[idx, "LatestEventTimestampUtc"] = ts
+                    created_cols.add("LatestEventTimestampUtc")
+                out.at[idx, "ScanEventsCount"] = int(scan_ct)
                 created_cols.add("ScanEventsCount")
-                out.at[idx, "ScanEventsCount"] = int(scan_count)
-            except Exception:
-                # best-effort; ignore on failure
-                pass
-            # Collect scan event timestamps (ISO strings) into ScanEventTimestamps for use by rules
-            try:
-                def _collect_scan_dates(obj):
-                    dates = []
-                    if isinstance(obj, dict):
-                        se = obj.get("scanEvents")
-                        if isinstance(se, list):
-                            for ev in se:
-                                if isinstance(ev, dict):
-                                    for key in ("date", "dateTime", "eventDate"):
-                                        v = ev.get(key)
-                                        if isinstance(v, str) and "T" in v:
-                                            dates.append(v)
-                        outcr = obj.get("completeTrackResults")
-                        if isinstance(outcr, list):
-                            for cr in outcr:
-                                if not isinstance(cr, dict):
-                                    continue
-                                tr_list = cr.get("trackResults")
-                                if isinstance(tr_list, list):
-                                    for tr in tr_list:
-                                        if not isinstance(tr, dict):
-                                            continue
-                                        se2 = tr.get("scanEvents")
-                                        if isinstance(se2, list):
-                                            for ev2 in se2:
-                                                if isinstance(ev2, dict):
-                                                    for key in ("date", "dateTime", "eventDate"):
-                                                        v2 = ev2.get(key)
-                                                        if isinstance(v2, str) and "T" in v2:
-                                                            dates.append(v2)
-                    return dates
-
-                ts_list = _collect_scan_dates(payload)
+                out.at[idx, "ScanEventTimestamps"] = scan_ts
                 created_cols.add("ScanEventTimestamps")
-                out.at[idx, "ScanEventTimestamps"] = ts_list
             except Exception:
                 pass
 
-            # Optionally write normalized sidecar
+            # Optional sidecar write
             if sidecar_dir is not None:
                 try:
                     (Path(sidecar_dir) / f"{carrier}_{tn}.json").write_text(
@@ -401,12 +344,13 @@ class Enricher:
                     self._safe_log(
                         "warning", "Sidecar write failed for %s/%s: %s", carrier, tn, ex)
 
-        # Ensure any newly created columns have empty strings (not NaN) where missing
-        # Be defensive: if a column somehow wasn't created by the row loop, create it now.
+        # Normalize newly created cols to string-friendly blanks where appropriate
         for k in created_cols:
             if k not in out.columns:
                 out[k] = ""
-            # Use pandas string dtype and fill missing values with empty string
+            # Don't coerce dict/list fields to string dtype
+            if k in ("latestStatusDetail", "ScanEventTimestamps"):
+                continue
             out[k] = out[k].astype("string").fillna("")
 
         return out

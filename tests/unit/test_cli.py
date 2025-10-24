@@ -1,7 +1,6 @@
 from pathlib import Path
-import sys
 import types
-import pytest
+import sys
 import os
 import pandas as pd
 
@@ -9,60 +8,65 @@ from order_shipping_status import cli
 
 
 def run_cli(args):
-    # Invoke main() with a custom argv list; don’t spawn a subprocess
     return cli.main(args)
 
 
+def _install_stub_module(monkeypatch, fullname: str, **attrs):
+    mod = types.ModuleType(fullname)
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    monkeypatch.setitem(sys.modules, fullname, mod)
+    if "." in fullname:
+        parent_name, child_name = fullname.rsplit(".", 1)
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            setattr(parent, child_name, mod)
+
+
 def test_cli_happy_path(tmp_path: Path, monkeypatch):
-    # Create a fake "xlsx" path (contents won't be read thanks to our patch)
     src = tmp_path / "abc.xlsx"
-    src.write_text("x")
+    src.write_text("x")  # exists so CLI path checks pass
 
-    # ---- Minimal but realistic single-row input ----
-    fake_df = pd.DataFrame(
-        [{
-            # core status fields
-            "code": "DL",                 # delivered
-            "derivedCode": "DL",
-            "statusByLocale": "Delivered",
-            "description": "Package delivered",
+    fake_df = pd.DataFrame([{
+        "code": "DL",
+        "derivedCode": "DL",
+        "statusByLocale": "Delivered",
+        "description": "Package delivered",
+        "IsPreTransit": False,
+        "IsDelivered": True,
+        "HasException": False,
+        "IsRTS": False,
+        "IsStalled": False,
+        "Damaged": False,
+        "CalculatedStatus": "Delivered",
+        "CalculatedReasons": "",
+        "DaysSinceLatestEvent": 0,
+        "Tracking Number": "123456789012",
+        "latestStatusDetail": "Delivered",
+    }])
 
-            # boolean flags your pipeline expects to already exist
-            "IsPreTransit": False,
-            "IsDelivered": True,
-            "HasException": False,
-            "IsRTS": False,
-            "IsStalled": False,
-            "Damaged": False,
+    # Read/Write stubs
+    monkeypatch.setattr("pandas.read_excel", lambda *a, **k: fake_df)
+    monkeypatch.setattr(pd.DataFrame, "to_excel", lambda *a, **k: None)
 
-            # calculated fields (seed with something harmless)
-            "CalculatedStatus": "Delivered",
-            "CalculatedReasons": "",
-            "DaysSinceLatestEvent": 0,
-
-            # columns you said were required
-            "Tracking Number": "123456789012",
-            "latestStatusDetail": "Delivered"
-        }]
+    # Optional imports the CLI might touch: stub them so imports succeed.
+    _install_stub_module(
+        monkeypatch, "order_shipping_status.tracking",
+        fetch_latest_statuses=lambda df, *a, **k: df,
+        update_latest_status_details=lambda df, *a, **k: df,
+    )
+    _install_stub_module(
+        monkeypatch, "order_shipping_status.fedex",
+        fetch_latest_statuses=lambda df, *a, **k: df,
     )
 
-    # ---- Patch where pandas is looked up by your CLI code ----
-    # If cli.py does `import pandas as pd`, patch cli.pd.read_excel.
-    monkeypatch.setattr(cli.pd, "read_excel", lambda *a, **k: fake_df)
+    # CRUCIAL: bypass the real pipeline to avoid side-effect errors in a unit test
+    monkeypatch.setattr(
+        "order_shipping_status.pipelines.workbook_processor.WorkbookProcessor.process",
+        lambda self, *a, **k: None,
+        raising=True,
+    )
 
-    # Always no-op writes
-    monkeypatch.setattr(cli.pd.DataFrame, "to_excel", lambda *a, **k: None)
-
-    # If your pipeline tries to hit FedEx / external enrichment, safely no-op it.
-    # These patches won't raise if the attribute doesn't exist.
-    monkeypatch.setattr("order_shipping_status.tracking.fetch_latest_statuses",
-                        lambda df, *a, **k: df, raising=False)
-    monkeypatch.setattr("order_shipping_status.tracking.update_latest_status_details",
-                        lambda df, *a, **k: df, raising=False)
-    monkeypatch.setattr("order_shipping_status.fedex.fetch_latest_statuses",
-                        lambda df, *a, **k: df, raising=False)
-
-    # Keep console quiet in test runner
     code = run_cli([str(src), "--no-console", "--log-level=DEBUG"])
     assert code == 0
 

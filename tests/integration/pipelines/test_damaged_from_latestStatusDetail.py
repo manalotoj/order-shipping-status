@@ -64,6 +64,8 @@ def _normalized_row_from_sample() -> dict:
         "latestStatusDetail": lsd,
         # optional fallback if your indicators look at raw:
         "raw": SAMPLE_BODY,
+        # ensure debug print in WorkbookProcessor has this optional column
+        "ScanEventsCount": 0,
     }
 
 
