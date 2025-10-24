@@ -66,17 +66,18 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     from order_shipping_status.api.normalize import normalize_fedex
     from order_shipping_status.io.schema import OUTPUT_FEDEX_COLUMNS
 
-    # --- Arrange: replay body for a tracking number ---
+    # --- Arrange: replay body for a tracking number (single combined file) ---
     tracking = "123456789012"
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    (replay_dir / f"{tracking}.json").write_text(json.dumps({
+    replay_file = tmp_path / "replay.json"
+    # Keep shape similar to real capture: include completeTrackResults for indexing
+    replay_file.write_text(json.dumps([{
+        "completeTrackResults": [{"trackingNumber": tracking}],
         "code": "DLV",
         "statusByLocale": "Delivered",
         "description": "Left at front door",
         "latestStatusDetail": {"one": 1, "two": 2},
         "Tracking Number": tracking,
-    }), encoding="utf-8")
+    }]), encoding="utf-8")
 
     # --- Arrange: input workbook with that tracking number (include disposable first column) ---
     src = tmp_path / "in.xlsx"
@@ -101,7 +102,7 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     # --- Act: run with ReplayClient + normalizer, skip date filter to avoid window logic ---
     proc = WorkbookProcessor(
         Logger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(replay_file),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,

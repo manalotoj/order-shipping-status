@@ -102,12 +102,10 @@ def test_stalled_tns_from_10_07_capture(tmp_path: Path):
     if missing:
         pytest.fail(f"Missing TNs in capture: {missing!r}")
 
-    # Materialize replay files for the targets
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    for t in TARGET_TNS:
-        (replay_dir /
-         f"{t}.json").write_text(json.dumps(mapping[t]), encoding="utf-8")
+    # Materialize a single combined replay file (one JSON array) for the targets
+    combined_path = tmp_path / "replay.json"
+    combined_records = [mapping[t] for t in TARGET_TNS]
+    combined_path.write_text(json.dumps(combined_records), encoding="utf-8")
 
     # Build input workbook rows for each TN (include a dummy first column so Preprocessor
     # does not drop the Tracking Number).
@@ -127,7 +125,7 @@ def test_stalled_tns_from_10_07_capture(tmp_path: Path):
 
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(combined_path),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,

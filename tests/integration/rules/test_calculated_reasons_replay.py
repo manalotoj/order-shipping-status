@@ -108,13 +108,11 @@ def test_calculated_reasons_matches_indicators(tmp_path: Path, raw_capture_path:
     if not mapping:
         pytest.skip("Capture did not contain any completeTrackResults entries.")
 
-    # Materialize a small replay set (up to 8 tracking numbers for speed)
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
+    # Materialize a small combined replay file (up to 8 tracking numbers for speed)
     subset = list(mapping.keys())[:8]
-    for tn in subset:
-        (replay_dir /
-         f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
+    combined = [mapping[tn] for tn in subset]
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps(combined), encoding="utf-8")
 
     # Build minimal input workbook with those TNs
     rows = [{
@@ -133,7 +131,7 @@ def test_calculated_reasons_matches_indicators(tmp_path: Path, raw_capture_path:
     # Run processor
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(replay_file),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,

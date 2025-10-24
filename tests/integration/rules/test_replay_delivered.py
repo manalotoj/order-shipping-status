@@ -116,12 +116,10 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
         raise AssertionError(
             "No delivered rows found in capture; cannot run delivered classification test")
 
-    # Write replays
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    for tn in subset:
-        (replay_dir /
-         f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
+    # Write a combined replay JSON file (single-file replay mode)
+    combined = [mapping[tn] for tn in subset]
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps(combined), encoding="utf-8")
 
     # Build input workbook (date filter is disabled, so dates don't matter)
     rows = [{
@@ -139,7 +137,7 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
 
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(replay_file),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,
@@ -158,7 +156,7 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
         out, sheet_name="All Shipments", engine="openpyxl")
     df_proc = ColumnContract().ensure(df_input)
     df_proc = Enricher(_QuietLogger(), client=ReplayClient(
-        replay_dir), normalizer=normalize_fedex).enrich(df_proc)
+        replay_file), normalizer=normalize_fedex).enrich(df_proc)
     df_proc = apply_indicators(df_proc)
     df_proc = map_indicators_to_status(df_proc)
 

@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--replay-dir",
         type=Path,
         default=None,
-        help="Directory containing <Tracking Number>.json bodies for deterministic replays.",
+        help="Path to a single JSON file containing one or more API bodies for deterministic replay. (Historical name: --replay-dir)",
     )
     p.add_argument(
         "--use-api",

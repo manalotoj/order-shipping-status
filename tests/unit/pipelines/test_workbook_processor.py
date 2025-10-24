@@ -19,15 +19,16 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     from order_shipping_status.api.client import ReplayClient, normalize_status
 
     tn = "123456789012"
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    (replay_dir / f"{tn}.json").write_text(json.dumps({
+    replay_file = tmp_path / "replay.json"
+    # Add completeTrackResults so the ReplayClient will index this record by tracking number
+    replay_file.write_text(json.dumps([{
+        "completeTrackResults": [{"trackingNumber": tn}],
         "code": "DLV",
         "statusByLocale": "Delivered",
         "description": "Left at front door",
         "Tracking Number": "TN1",
         "latestStatusDetail": {"one": 1, "two": 2},
-    }), encoding="utf-8")
+    }]), encoding="utf-8")
 
     src = tmp_path / "in.xlsx"
     pd.DataFrame([{
@@ -42,7 +43,7 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     out = tmp_path / "in_processed.xlsx"
 
     env = SimpleNamespace(SHIPPING_CLIENT_ID="", SHIPPING_CLIENT_SECRET="")
-    proc = WorkbookProcessor(Logger(), client=ReplayClient(replay_dir), normalizer=normalize_status,
+    proc = WorkbookProcessor(Logger(), client=ReplayClient(replay_file), normalizer=normalize_status,
                              reference_date=dt.date(2025, 1, 15))
     proc.process(src, out, env)
 
@@ -56,7 +57,7 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
     df_input = pd.read_excel(
         out, sheet_name="All Shipments", engine="openpyxl")
     df_proc = ColumnContract().ensure(df_input)
-    df_proc = Enricher(QL(), client=ReplayClient(replay_dir),
+    df_proc = Enricher(QL(), client=ReplayClient(replay_file),
                        normalizer=normalize_status).enrich(df_proc)
     df_proc = apply_indicators(df_proc)
     df_proc = map_indicators_to_status(df_proc)

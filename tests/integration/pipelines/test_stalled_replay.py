@@ -109,12 +109,9 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
     if STALLED_TN not in mapping:
         raise AssertionError(f"Stalled TN {STALLED_TN} not present in capture")
 
-    # Materialize only the stalled TN replay
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    (replay_dir / f"{STALLED_TN}.json").write_text(
-        json.dumps(mapping[STALLED_TN]), encoding="utf-8"
-    )
+    # Materialize a single-file combined replay containing the stalled TN
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([mapping[STALLED_TN]]), encoding="utf-8")
 
     # Build minimal input workbook with that TN
     rows = [{
@@ -132,7 +129,7 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
 
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(replay_file),
         normalizer=normalize_fedex,
         reference_date=date(2025, 10, 13),
         enable_date_filter=False,

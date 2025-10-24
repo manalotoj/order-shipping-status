@@ -96,7 +96,7 @@ def _map_tracking_to_body(combined_records: list[dict]) -> dict[str, dict]:
 
 @pytest.fixture()
 def replay_dir_with_listed_tns(tmp_path: Path, raw_capture_path: Path) -> tuple[Path, list[str]]:
-    """Write replay files for each TN from the provided list that exists in the capture."""
+    """Write a single combined replay JSON file containing bodies for each TN present in the capture."""
     data = json.loads(raw_capture_path.read_text(encoding="utf-8"))
     mapping = _map_tracking_to_body(data)
 
@@ -105,13 +105,11 @@ def replay_dir_with_listed_tns(tmp_path: Path, raw_capture_path: Path) -> tuple[
         pytest.skip(
             "None of the provided pretransit TNs were present in the capture file.")
 
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    for tn in present:
-        (replay_dir /
-         f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
+    combined = [mapping[tn] for tn in present]
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps(combined), encoding="utf-8")
 
-    return replay_dir, present
+    return replay_file, present
 
 
 class _QuietLogger:

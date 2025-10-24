@@ -39,13 +39,17 @@ def test_cli_replay_populates_columns(tmp_path: Path):
     src = tmp_path / "in.xlsx"
     pd.DataFrame([{"X": "x", "Promised Delivery Date": "2025-01-06", "Delivery Tracking Status": "in transit",
                    "Tracking Number": tn, "Carrier Code": "FDX", }]).to_excel(src, index=False)
-    rdir = tmp_path / "replay"
-    rdir.mkdir()
-    # Use a non-delivered code so the enriched row appears in the 'All Issues' sheet
-    (rdir / f"{tn}.json").write_text(json.dumps({"code": "OC",
-                                                 "statusByLocale": "Label created", "description": "ok"}), encoding="utf-8")
+    # Create a single combined replay JSON file and point CLI at it
+    replay_file = tmp_path / "replay.json"
+    # Include completeTrackResults so ReplayClient can index by tracking number
+    replay_file.write_text(json.dumps([{
+        "completeTrackResults": [{"trackingNumber": tn}],
+        "code": "OC",
+        "statusByLocale": "Label created",
+        "description": "ok"
+    }]), encoding="utf-8")
     code = run_cli([str(src), "--no-console", "--reference-date",
-                   "2025-01-15", "--replay-dir", str(rdir)])
+                   "2025-01-15", "--replay-dir", str(replay_file)])
     assert code == 0
     processed, _ = derive_output_paths(src)
     out = pd.read_excel(processed, sheet_name="All Issues", engine="openpyxl")

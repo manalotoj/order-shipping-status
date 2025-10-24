@@ -61,11 +61,9 @@ def test_tn_snapshot_matches(tmp_path: Path, tn: str):
     if tn not in mapping:
         pytest.fail(f"TN {tn} not present in capture; cannot assert snapshot")
 
-    # materialize replay and input workbook
-    replay_dir = tmp_path / "replay"
-    replay_dir.mkdir()
-    (replay_dir /
-     f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
+    # materialize a single-file combined replay and input workbook
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([mapping[tn]]), encoding="utf-8")
 
     rows = [{"X": "drop-me", "Tracking Number": tn,
              "Carrier Code": "FDX", "RowId": 1, "latestStatusDetail": {"one": 1, "two": 2}, }]
@@ -81,7 +79,7 @@ def test_tn_snapshot_matches(tmp_path: Path, tn: str):
 
     proc = WorkbookProcessor(
         logger=_QuietLogger(),
-        client=ReplayClient(replay_dir),
+        client=ReplayClient(replay_file),
         normalizer=normalize_fedex,
         reference_date=None,
         enable_date_filter=False,

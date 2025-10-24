@@ -29,8 +29,8 @@ This document summarizes what the system does today, how replay works (with or w
   - Input workbook rows are read (first sheet). Typical columns: `Tracking Number`, `Carrier Code`, optionally `Promised Delivery Date`, `Delivery Tracking Status`, etc.
 
   ### Replay mode (deterministic, recommended for CI)
-  - The CLI accepts a `--replay-dir` containing one JSON file per tracking number named `<TrackingNumber>.json`. The `ReplayClient` will load those files to provide carrier payloads to the normalizer.
-  - Note: the CLI can also write a single combined API bodies file via `--dump-api-bodies` (see below). That combined dump is a JSON array written by `FedExWriter` but is not directly consumed by `ReplayClient` — if you want to replay from a combined dump you must split it into per-TN files or adapt the replay client.
+  - The CLI accepts `--replay-dir`, but in current usage this argument should point to a single JSON file containing one or more API bodies (the name is historical — pass the combined dump file). The `ReplayClient` will read that file and index payloads by tracking number for replay.
+  - Note: the CLI can also write a single combined API bodies file via `--dump-api-bodies` (see below). That combined dump is a JSON array written by `FedExWriter` and is directly consumable by the `ReplayClient` when passed as `--replay-dir`.
 
 
   ## High-level pipeline
@@ -86,7 +86,7 @@ This document summarizes what the system does today, how replay works (with or w
 
   ## Enrichment and sidecars
 
-  - `ReplayClient(replay_dir)` expects per-TN JSON files named exactly `<trackingNumber>.json`.
+  - `ReplayClient(replay_dir)` expects a **single** JSON file (not a directory). The file may contain a single JSON object or a JSON array of API bodies; the client indexes entries by tracking number for lookup.
   - When live API mode is used (`--use-api`) and `--dump-api-bodies PATH` is provided, the CLI will persist raw API responses into a single JSON array file at `PATH` (the `FedExWriter` writes a JSON array and exposes `read_all()` to read that array).
   - For diagnostics you can enable `--debug-sidecar PATH` which writes per-row normalized JSON sidecars named `<Carrier>_<TrackingNumber>.json` into `PATH`.
 
@@ -119,7 +119,7 @@ This document summarizes what the system does today, how replay works (with or w
   The CLI entrypoint is `order_shipping_status.cli` and exposes the following (most relevant) options:
 
   - `input` (positional): path to input `.xlsx` (required)
-  - `--replay-dir PATH`: load per-TN JSON payloads from `PATH` (deterministic replay)
+  -- `--replay-dir PATH`: path to a single JSON file containing one or more API bodies to use for deterministic replay (historically this was a directory of per-TN files; modern usage uses a single combined dump).
   - `--use-api`: call the live FedEx API (requires credentials in environment)
   - `--dump-api-bodies PATH`: when using live API, persist raw API responses into a single JSON array file at `PATH` (FedExWriter writes a JSON array)
   - `--reference-date YYYY-MM-DD`: anchor date for prior-week filtering (Sunday..Saturday). Example: `2025-10-22`.
@@ -133,8 +133,8 @@ This document summarizes what the system does today, how replay works (with or w
 
   ## Replay vs combined API dumps
 
-  - `--replay-dir` (per-TN files) is the recommended mode for deterministic CI and regression tests.
-  - `--dump-api-bodies PATH` writes a single JSON array file containing the raw response bodies. That file is useful as an archival artifact, but note that the current `ReplayClient` does not consume this combined dump directly — you must split it into per-TN files to replay the exact responses.
+  -- `--replay-dir` should point to a single JSON file (combined dump) for deterministic CI and regression tests.
+  -- `--dump-api-bodies PATH` writes a single JSON array file containing the raw response bodies. That file can be used directly with `--replay-dir PATH` to replay the archived responses.
 
 
   ## Tests & integration
