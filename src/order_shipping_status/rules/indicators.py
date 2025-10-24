@@ -10,7 +10,8 @@ INDICATOR_COLS: tuple[str, ...] = (
     "HasException",
     "IsRTS",
     "IsStalled",
-    "Damaged",  # ensure this column always exists
+    "Damaged",
+    "UnableToDeliver",
 )
 
 # ---- Helpers -----------------------------------------------------------------
@@ -180,8 +181,40 @@ def _is_rts_text(code: pd.Series, status: pd.Series, desc: pd.Series) -> pd.Seri
     return c | s | d
 
 
-# Per latest requirement: Damaged must be found in ancillaryDetails.
-_DAMAGED_PATTERNS = (r"\bdamaged\b",)
+# Phrase we care about (case-insensitive)
+_UNABLE_TO_DELIVER_RE = r"\bunable\s+to\s+deliver\b"
+
+
+def _compute_unable_to_deliver(df: pd.DataFrame) -> pd.Series:
+    """
+    UnableToDeliver = 1 IFF:
+      (a) row is an exception, AND
+      (b) 'unable to deliver' appears in ancillaryDetails OR status/description.
+    """
+    n = len(df)
+
+    # (a) Exception?
+    if "HasException" in df.columns:
+        is_exc = pd.to_numeric(
+            df["HasException"], errors="coerce").fillna(0).astype(int) == 1
+    else:
+        status_lc = _as_lower_str_series(
+            df.get("statusByLocale", pd.Series([""] * n)))
+        is_exc = status_lc.str.contains("exception", na=False)
+
+    # (b) Gather from ancillary + status/description (same pattern as Damaged)
+    # already lowercased by helper
+    ancillary = _extract_ancillary_series(df)
+    status = _as_lower_str_series(
+        df.get("statusByLocale", pd.Series([""] * n)))
+    desc = _as_lower_str_series(df.get("description", pd.Series([""] * n)))
+
+    combined = (ancillary.fillna("") + " " +
+                status.fillna("") + " " + desc.fillna(""))
+    has_phrase = combined.str.contains(
+        _UNABLE_TO_DELIVER_RE, regex=True, na=False)
+
+    return (is_exc & has_phrase).astype(int)
 
 
 def _as_lower_str_series(s: pd.Series) -> pd.Series:
@@ -275,6 +308,11 @@ def apply_indicators(df: pd.DataFrame, *, stalled_threshold_days: int = 4) -> pd
     final_stalled = stalled_cond & (~terminal) & (~pre_flag)
     out["IsStalled"] = _as_int_series(
         final_stalled.astype(int), length=len(out))
+
+    try:
+        out["UnableToDeliver"] = _compute_unable_to_deliver(out)
+    except Exception:
+        out["UnableToDeliver"] = 0
 
     # Damaged — strictly from ancillaryDetails under latestStatusDetail/raw
     try:

@@ -302,6 +302,12 @@ class WorkbookProcessor:
                 # duplication with 'All Issues' and reduce workbook size.
                 marker.to_excel(xw, sheet_name="Marker", index=False)
 
+        # # UnableToDeliver records: UnableToDeliver == 1
+        # if "UnableToDeliver" in df_out.columns:
+        #     unableToDeliver = df_out[df_out["UnableToDeliver"] == 1]
+        # else:
+        #     unableToDeliver = pd.DataFrame(columns=df_out.columns)
+
     def _postprocess_workbook(self, processed_path: Path) -> None:
         try:
             wb = load_workbook(processed_path)
