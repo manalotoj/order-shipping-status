@@ -118,6 +118,7 @@ def test_stalled_tns_from_10_07_capture(tmp_path: Path):
             "Tracking Number": t,
             "Carrier Code": "FDX",
             "RowId": i,
+            "latestStatusDetail": {"one": 1, "two": 2},
         })
 
     src = tmp_path / "in.xlsx"

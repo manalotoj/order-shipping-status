@@ -20,6 +20,8 @@ def test_workbook_processor_end_to_end(tmp_path: Path):
         "Promised Delivery Date": "2025-01-06",
         "Delivery Tracking Status": "in transit",
         "A": 1,
+        "Tracking Number": "123456789012",
+        "latestStatusDetail": "{}",
     }]).to_excel(src, index=False)
     out = tmp_path / "abc_processed.xlsx"
 

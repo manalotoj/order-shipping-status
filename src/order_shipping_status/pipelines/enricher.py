@@ -172,6 +172,55 @@ class Enricher:
                 created_cols.add(k)
                 out.at[idx, k] = v
 
+        # --- Ensure latestStatusDetail is present (and ancillary text flattened) ---
+        def _extract_lsd_from_raw(raw: object) -> dict:
+            """Safely extract latestStatusDetail dict from the raw FedEx payload."""
+            try:
+                if not isinstance(raw, dict):
+                    return {}
+                outp = raw.get("output", raw)
+                if not isinstance(outp, dict):
+                    return {}
+                ctr = outp.get("completeTrackResults")
+                if not isinstance(ctr, list) or not ctr:
+                    return {}
+                tr_list = ctr[0].get("trackResults")
+                if not isinstance(tr_list, list) or not tr_list:
+                    return {}
+                lsd = tr_list[0].get("latestStatusDetail")
+                return lsd if isinstance(lsd, dict) else {}
+            except Exception:
+                return {}
+
+        def _ancillary_text(lsd: dict) -> str:
+            try:
+                details = lsd.get("ancillaryDetails") or []
+                parts = []
+                if isinstance(details, list):
+                    for d in details:
+                        if isinstance(d, dict):
+                            for k in ("reasonDescription", "actionDescription", "reason", "action"):
+                                v = d.get(k)
+                                if v:
+                                    parts.append(str(v))
+                return " ".join(parts)
+            except Exception:
+                return ""
+
+        try:
+            # Only compute when not already present.
+            if "latestStatusDetail" not in out.columns and "raw" in out.columns:
+                out["latestStatusDetail"] = out["raw"].apply(
+                    _extract_lsd_from_raw)
+            # A flat text column is useful for diagnostics and optional rules.
+            if "latestStatusDetail" in out.columns and "LatestAncillaryText" not in out.columns:
+                out["LatestAncillaryText"] = out["latestStatusDetail"].apply(
+                    _ancillary_text)
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(
+                    "Ancillary extraction skipped due to error: %s", e)
+
             # Backfill core FedEx fields (code/derivedCode/statusByLocale/description)
             # when the normalizer didn't provide them. Use the same helpers as
             # the normalizer as a best-effort fallback.

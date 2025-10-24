@@ -56,6 +56,8 @@ class WorkbookProcessor:
         df_in = self._read_input(input_path)
 
         df_out = self._prepare_and_enrich(df_in, sidecar_dir=sidecar_dir)
+        print(
+            df_out[["Tracking Number", "derivedCode", "HasException", "Damaged"]])
 
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
         has_creds = bool(
@@ -101,7 +103,7 @@ class WorkbookProcessor:
         return df_in
 
     def _prepare_and_enrich(self, df_in: pd.DataFrame, *, sidecar_dir: Optional[Path] = None) -> pd.DataFrame:
-        # Preprocess + contract + enrichment
+        # Preprocess  contract  enrichment
         df_prep = Preprocessor(
             self.reference_date,
             logger=self.logger,
@@ -132,6 +134,29 @@ class WorkbookProcessor:
             )
         else:
             df_out["DaysSinceLatestEvent"] = 0
+
+        print(df_out.columns)
+        # print(df_out["latestStatusDetail"].to_dict())
+
+        # Optional debug peek (safe): only log if the columns exist
+        try:
+            if "latestStatusDetail" in df_out.columns and len(df_out) > 0:
+                sample = df_out["latestStatusDetail"].iloc[0]
+                if self.logger:
+                    self.logger.debug("sample.latestStatusDetail keys: %s",
+                                      list(sample.keys()) if isinstance(sample, dict) else type(sample))
+            elif "raw" in df_out.columns and len(df_out) > 0:
+                sample_raw = df_out["raw"].iloc[0]
+                if self.logger:
+                    if isinstance(sample_raw, dict):
+                        self.logger.debug(
+                            "sample.raw top-level keys: %s", list(sample_raw.keys()))
+                    else:
+                        self.logger.debug(
+                            "sample.raw type: %s", type(sample_raw))
+        except Exception:
+            # swallow any debug inspection errors
+            pass
 
         # Apply indicators and map to status
         df_out = apply_indicators(
@@ -196,6 +221,17 @@ class WorkbookProcessor:
         else:
             stalled = pd.DataFrame(columns=df_out.columns)
 
+        # Damaged or Returned records:
+        # include any TN with Damaged == 1 or IsRTS == 1
+        if "Damaged" in df_out.columns or "IsRTS" in df_out.columns:
+            damaged_or_returned = df_out[
+                ((df_out["Damaged"] == 1)
+                 if "Damaged" in df_out.columns else False)
+                | ((df_out["IsRTS"] == 1) if "IsRTS" in df_out.columns else False)
+            ]
+        else:
+            damaged_or_returned = pd.DataFrame(columns=df_out.columns)
+
         # All Issues: TNs that are NOT delivered (IsDelivered != 1). If
         # IsDelivered is not present, fall back to the previous heuristic
         # (HasException OR IsStalled OR IsRTS).
@@ -244,7 +280,12 @@ class WorkbookProcessor:
                 stalled.to_excel(xw, sheet_name="Stalled",
                                  index=False, na_rep="")
 
-                # 5) Marker
+                # 5) Damaged or Returned — appears after Stalled
+                damaged_or_returned.to_excel(
+                    xw, sheet_name="Damaged or Returned", index=False, na_rep=""
+                )
+
+                # 6) Marker
                 # Intentionally do NOT write a 'Processed' sheet to avoid
                 # duplication with 'All Issues' and reduce workbook size.
                 marker.to_excel(xw, sheet_name="Marker", index=False)
@@ -260,7 +301,7 @@ class WorkbookProcessor:
                 header = [c.value for c in next(
                     ws.iter_rows(min_row=1, max_row=1))]
                 if "CalculatedReasons" in header:
-                    col_idx = header.index("CalculatedReasons") + 1
+                    col_idx = header.index("CalculatedReasons")
                     for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
                         cell = row[0]
                         if cell.value is None:

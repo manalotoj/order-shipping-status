@@ -28,7 +28,8 @@ class Logger:
 def test_cli_creates_processed_with_expected_columns(tmp_path: Path):
     src = tmp_path / "abc.xlsx"
     # Include a disposable first column so the preprocessor can drop it
-    pd.DataFrame([{"X": "drop", "A": 1, "B": 2}]).to_excel(src, index=False)
+    pd.DataFrame([{"X": "drop", "A": 1, "B": 2, "latestStatusDetail": {
+                 "one": 1, "two": 2}, "Tracking Number": "123456789012"}]).to_excel(src, index=False)
 
     # Relax date filtering so we don't care about the date window here
     code = run_cli([str(src), "--no-console",
@@ -73,6 +74,8 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
         "code": "DLV",
         "statusByLocale": "Delivered",
         "description": "Left at front door",
+        "latestStatusDetail": {"one": 1, "two": 2},
+        "Tracking Number": tracking,
     }), encoding="utf-8")
 
     # --- Arrange: input workbook with that tracking number (include disposable first column) ---
@@ -82,6 +85,7 @@ def test_replay_enrichment_populates_fedex_columns(tmp_path: Path):
         "Tracking Number": tracking,
         "Carrier Code": "FDX",
         "A": 1,
+        "latestStatusDetail": {"one": 1, "two": 2},
     }]).to_excel(src, index=False)
     out = tmp_path / "in_processed.xlsx"
 

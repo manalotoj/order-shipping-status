@@ -124,6 +124,7 @@ def test_calculated_reasons_matches_indicators(tmp_path: Path, raw_capture_path:
         "Tracking Number": tn,
         "Carrier Code": "FDX",
         "RowId": i + 1,
+        "latestStatusDetail": {"one": 1, "two": 2},
     } for i, tn in enumerate(subset)]
     src = tmp_path / "in.xlsx"
     pd.DataFrame(rows).to_excel(src, index=False)

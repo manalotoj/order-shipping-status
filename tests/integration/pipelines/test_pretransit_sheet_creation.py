@@ -34,7 +34,7 @@ def _read_sheet(path: Path, sheet: str) -> pd.DataFrame:
 def test_pretransit_sheet_has_rows(tmp_path):
     # Build input with one pretransit tracking number (Label created/OC)
     rows = [{"X": "drop", "Tracking Number": "TN1",
-             "Carrier Code": "FDX", "RowId": 1}]
+             "Carrier Code": "FDX", "RowId": 1, "latestStatusDetail": "{}"}]
     src = _write_temp_xlsx(rows, tmp_path, "in_pretransit.xlsx")
     out = Path(tmp_path) / "out_pretransit.xlsx"
 
@@ -65,7 +65,7 @@ def test_pretransit_sheet_has_rows(tmp_path):
 def test_pretransit_sheet_empty_when_no_pretransit(tmp_path):
     # Build input with a non-pretransit tracking number
     rows = [{"X": "drop", "Tracking Number": "TN2",
-             "Carrier Code": "FDX", "RowId": 1}]
+             "Carrier Code": "FDX", "RowId": 1, "latestStatusDetail": "{}"}]
     src = _write_temp_xlsx(rows, tmp_path, "in_no_pretransit.xlsx")
     out = Path(tmp_path) / "out_no_pretransit.xlsx"
 

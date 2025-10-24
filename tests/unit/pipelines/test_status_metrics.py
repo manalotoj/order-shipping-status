@@ -25,9 +25,12 @@ def test_days_since_latest_event_computed(tmp_path: Path):
 
     # Minimal input with first column to be dropped by preprocessor
     df = pd.DataFrame([
-        {"X": "drop", "LatestEventTimestampUtc": five_days_ago},  # -> 5
-        {"X": "drop", "LatestEventTimestampUtc": "not-a-date"},   # -> 0 fallback
-        {"X": "drop", "LatestEventTimestampUtc": None},           # -> 0 fallback
+        {"X": "drop", "LatestEventTimestampUtc": five_days_ago, "Tracking Number": "TN1",
+            "latestStatusDetail": "{}"},  # -> 5
+        {"X": "drop", "LatestEventTimestampUtc": "not-a-date", "Tracking Number": "TN1",
+            "latestStatusDetail": "{}"},   # -> 0 fallback
+        {"X": "drop", "LatestEventTimestampUtc": None,
+            "latestStatusDetail": "{}"},           # -> 0 fallback
     ])
 
     src = tmp_path / "in.xlsx"

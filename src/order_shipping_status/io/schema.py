@@ -4,7 +4,8 @@ from __future__ import annotations
 
 OUTPUT_FEDEX_COLUMNS = ["code", "derivedCode", "statusByLocale", "description"]
 OUTPUT_STATUS_COLUMN = "CalculatedStatus"
-INDICATOR_COLS = ["IsPreTransit", "IsDelivered", "HasException", "IsRTS"]
+INDICATOR_COLS = ["IsPreTransit", "IsDelivered",
+                  "HasException", "IsRTS", "Damaged"]
 AUX_COLS = ["CalculatedReasons",
             "LatestEventTimestampUtc", "DaysSinceLatestEvent"]
 

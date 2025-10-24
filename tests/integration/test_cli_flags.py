@@ -14,7 +14,7 @@ def test_cli_reference_date_filters(tmp_path: Path):
         {"X": "x", "Promised Delivery Date": "2025-01-05",
             "Delivery Tracking Status": "in transit"},  # keep
         {"X": "x", "Promised Delivery Date": "2025-01-12",
-            "Delivery Tracking Status": "in transit"},  # drop
+            "Delivery Tracking Status": "in transit", },  # drop
     ]).to_excel(src, index=False)
     code = run_cli([str(src), "--no-console",
                    "--reference-date", "2025-01-15"])
@@ -38,7 +38,7 @@ def test_cli_replay_populates_columns(tmp_path: Path):
     tn = "123"
     src = tmp_path / "in.xlsx"
     pd.DataFrame([{"X": "x", "Promised Delivery Date": "2025-01-06", "Delivery Tracking Status": "in transit",
-                   "Tracking Number": tn, "Carrier Code": "FDX"}]).to_excel(src, index=False)
+                   "Tracking Number": tn, "Carrier Code": "FDX", }]).to_excel(src, index=False)
     rdir = tmp_path / "replay"
     rdir.mkdir()
     # Use a non-delivered code so the enriched row appears in the 'All Issues' sheet

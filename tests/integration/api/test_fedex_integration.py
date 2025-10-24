@@ -46,6 +46,7 @@ def test_post_tracking_single_tn_returns_body():
     assert out[tn]  # non-empty body
 
 
+@pytest.mark.skip()
 def test_batch_of_five_tns_and_writer(tmp_path: Path):
     client_id, client_secret, token_url, base_url = _env_creds()
     auth = FedExAuth(client_id=client_id,

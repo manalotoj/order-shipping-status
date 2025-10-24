@@ -68,7 +68,7 @@ def test_tn_snapshot_matches(tmp_path: Path, tn: str):
      f"{tn}.json").write_text(json.dumps(mapping[tn]), encoding="utf-8")
 
     rows = [{"X": "drop-me", "Tracking Number": tn,
-             "Carrier Code": "FDX", "RowId": 1}]
+             "Carrier Code": "FDX", "RowId": 1, "latestStatusDetail": {"one": 1, "two": 2}, }]
     src = tmp_path / "in.xlsx"
     pd.DataFrame(rows).to_excel(src, index=False)
     out = tmp_path / "out.xlsx"

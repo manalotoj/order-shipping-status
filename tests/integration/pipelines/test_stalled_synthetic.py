@@ -17,7 +17,12 @@ def test_stalled_synthetic_end_to_end(tmp_path: Path):
     out = tmp_path / "in_processed.xlsx"
     # Use LatestEventTimestampUtc far in the past; processor computes DaysSinceLatestEvent
     df = pd.DataFrame(
-        [{"X": "drop", "LatestEventTimestampUtc": "2000-01-01T00:00:00Z"}])
+        [{
+            "X": "drop",
+            "LatestEventTimestampUtc": "2000-01-01T00:00:00Z",
+            "latestStatusDetail": {"one": 1, "two": 2},
+            "Tracking Number": "123456789012",
+        }])
     df.to_excel(src, index=False)
 
     proc = WorkbookProcessor(

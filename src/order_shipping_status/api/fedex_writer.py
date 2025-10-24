@@ -10,18 +10,18 @@ from dataclasses import dataclass
 
 @dataclass
 class FedExWriter:
-    """Simple writer for FedEx API request/response bodies.
+    """Persist ONLY FedEx API response bodies as a single JSON array.
 
-    By default writes newline-delimited JSON (NDJSON) to the given path, one
-    JSON object per line with shape {"requested": [...], "response": {...}}.
-
-    Optionally `json_list=True` will cause the writer to maintain a JSON array on
-    disk (read existing, append, write back). That mode is less efficient for
-    large outputs but sometimes easier for downstream tooling.
+    File shape on disk:
+        [
+          { ...response body 1... },
+          { ...response body 2... },
+          ...
+        ]
     """
 
     path: Path
-    json_list: bool = False
+    json_list: bool = True
     logger: Optional[logging.Logger] = None
 
     def __post_init__(self) -> None:
@@ -33,66 +33,41 @@ class FedExWriter:
         # Ensure parent dir exists lazily on first write
 
     def write(self, requested: Any, response: Any) -> None:
-        """Persist a single requested/response pair.
+        """Back-compat entrypoint: now ignores `requested` and persists only `response`."""
+        self.add_response(response)
 
-        - requested: typically a list of tracking numbers or the request body
-        - response: the parsed JSON response (or whatever the transport returned)
-        """
-        obj = {"requested": requested, "response": response}
+    def add_response(self, response: Any) -> None:
+        """Append a single response body (dict-like) into the on-disk JSON array."""
         try:
             with self._lock:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                if not self.json_list:
-                    # NDJSON append
-                    with self.path.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(obj, ensure_ascii=False))
-                        fh.write("\n")
-                else:
-                    # JSON list mode: read existing (if any), append, write back
-                    items = []
-                    if self.path.exists():
-                        try:
-                            with self.path.open("r", encoding="utf-8") as fh:
-                                items = json.load(fh)
-                                if not isinstance(items, list):
-                                    items = []
-                        except Exception:
-                            items = []
-                    items.append(obj)
-                    with self.path.open("w", encoding="utf-8") as fh:
-                        json.dump(items, fh, ensure_ascii=False, indent=2)
+                items = []
+                if self.path.exists():
+                    try:
+                        with self.path.open("r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+                            if isinstance(data, list):
+                                items = data
+                    except Exception:
+                        items = []
+                items.append(response)
+                with self.path.open("w", encoding="utf-8") as fh:
+                    json.dump(items, fh, ensure_ascii=False, indent=2)
         except Exception as ex:
             try:
                 self.logger.warning(
-                    "Failed to persist FedEx API body to %s: %s", self.path, ex)
+                    "Failed to append FedEx API response to %s: %s", self.path, ex)
             except Exception:
                 pass
 
     def read_all(self) -> list:
-        """Read and return all saved objects.
-
-        Returns a list of objects for both NDJSON and JSON-list modes.
-        """
+        """Read and return all saved response bodies (JSON array)."""
         try:
             if not self.path.exists():
                 return []
-            if not self.json_list:
-                out = []
-                with self.path.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            out.append(json.loads(line))
-                        except Exception:
-                            # skip malformed lines
-                            continue
-                return out
-            else:
-                with self.path.open("r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    return data if isinstance(data, list) else []
+            with self.path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                return data if isinstance(data, list) else []
         except Exception as ex:
             try:
                 self.logger.warning(

@@ -125,6 +125,7 @@ def test_stalled_replay_end_to_end(tmp_path: Path, raw_capture_path: Path):
         "Tracking Number": STALLED_TN,
         "Carrier Code": "FDX",
         "RowId": 1,
+        "latestStatusDetail": {"one": 1, "two": 2},
     }]
     src = tmp_path / "in.xlsx"
     pd.DataFrame(rows).to_excel(src, index=False)

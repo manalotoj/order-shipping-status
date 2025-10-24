@@ -141,6 +141,7 @@ def test_pretransit_rows_classified(tmp_path: Path, replay_dir_with_listed_tns: 
         "Tracking Number": tn,
         "Carrier Code": "FDX",
         "RowId": idx + 1,
+        "latestStatusDetail": {"one": 1, "two": 2},
     } for idx, tn in enumerate(subset)]
 
     src = tmp_path / "in.xlsx"

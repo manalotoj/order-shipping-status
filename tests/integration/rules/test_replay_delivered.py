@@ -130,6 +130,7 @@ def test_replay_delivered_classified(tmp_path: Path, raw_capture_path: Path, bat
         "Delivery Tracking Status": "in transit",
         "Tracking Number": tn,
         "Carrier Code": "FDX",
+        "latestStatusDetail": {"one": 1, "two": 2},
     } for tn in subset]
 
     src = tmp_path / "in.xlsx"

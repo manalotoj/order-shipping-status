@@ -58,9 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--dump-api-bodies",
-        type=Path,
-        default=None,
-        help="Path to write a single JSON file containing raw API response bodies (appends per-run).",
+        action="store_true",
+        help="Dump raw API response bodies to <input-stem>-json-bodies.json next to the input file.",
     )
     # NEW: allow disabling the date filter used by the Preprocessor
     p.add_argument(
@@ -100,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Input: %s", args.input)
     logger.info("Processed output: %s", processed_path)
     logger.info("Log file: %s", log_path)
+
+    # If requested, compute the JSON bodies path: <input-stem>-json-bodies.json
+    dump_api_bodies_path = None
+    if args.dump_api_bodies:
+        dump_api_bodies_path = args.input.with_name(
+            f"{args.input.stem}-json-bodies.json")
+        logger.info("API bodies will be dumped to: %s", dump_api_bodies_path)
 
     # Load env (don’t fail unless user asked for strict)
     try:
@@ -145,8 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         client_raw = FedExClient(auth, cfg, transport=RequestsTransport())
 
         writer = None
-        if args.dump_api_bodies:
-            writer = FedExWriter(path=args.dump_api_bodies)
+        if dump_api_bodies_path:
+            writer = FedExWriter(path=dump_api_bodies_path)
 
         # Use the shared adapter module (keeps CLI small and allows reuse)
         from .api.fedex_helper import FedexHelper
