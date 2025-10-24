@@ -1,8 +1,61 @@
-# tests/unit/pipelines/test_preprocessor.py
 import datetime as dt
+from datetime import date
+
 import pandas as pd
 
 from order_shipping_status.pipelines.preprocessor import Preprocessor
+
+
+def test_prior_week_range_computes_sunday_to_saturday_for_prior_week():
+    # reference date: 2025-10-22 (Wednesday)
+    ref = date(2025, 10, 22)
+    p = Preprocessor(reference_date=ref)
+    start, end = p.prior_week_range()
+    # prior week should be 2025-10-12 .. 2025-10-18 (Sunday..Saturday)
+    assert start == date(2025, 10, 12)
+    assert end == date(2025, 10, 18)
+
+
+def test_prepare_filters_promised_delivery_date_to_prior_week_and_drops_first_column():
+    ref = date(2025, 10, 22)
+    p = Preprocessor(reference_date=ref, enable_date_filter=True)
+
+    # Build a DataFrame with an extraneous first column (simulates typical input)
+    rows = [
+        # in prior week (should be kept)
+        {"X": 0, "Promised Delivery Date": "2025-10-12", "Tracking Number": "TN-A"},
+        {"X": 1, "Promised Delivery Date": "2025-10-15", "Tracking Number": "TN-B"},
+        # outside prior week (should be dropped)
+        {"X": 2, "Promised Delivery Date": "2025-10-20", "Tracking Number": "TN-C"},
+        {"X": 3, "Promised Delivery Date": "2025-10-10", "Tracking Number": "TN-D"},
+    ]
+
+    df = pd.DataFrame(rows)
+
+    out = p.prepare(df)
+
+    # drop_first_column removes 'X', so remaining rows should be only the two in prior week
+    assert len(out) == 2
+    tns = set(out["Tracking Number"].astype(str).tolist())
+    assert tns == {"TN-A", "TN-B"}
+
+
+def test_prepare_skips_date_filter_when_disabled():
+    ref = date(2025, 10, 22)
+    p = Preprocessor(reference_date=ref, enable_date_filter=False)
+
+    rows = [
+        {"X": 0, "Promised Delivery Date": "2025-10-12", "Tracking Number": "TN-A"},
+        {"X": 1, "Promised Delivery Date": "2025-10-15", "Tracking Number": "TN-B"},
+        {"X": 2, "Promised Delivery Date": "2025-10-20", "Tracking Number": "TN-C"},
+    ]
+    df = pd.DataFrame(rows)
+    out = p.prepare(df)
+
+    # date filter disabled -> all rows preserved (after dropping first column)
+    assert len(out) == 3
+
+# tests/unit/pipelines/test_preprocessor.py
 
 
 def test_prior_week_range_fixed():
