@@ -217,24 +217,69 @@ class WorkbookProcessor:
         )
 
     def _write_workbook(self, processed_path: Path, df_in: pd.DataFrame, df_out: pd.DataFrame, marker: pd.DataFrame) -> None:
-        # Write All Shipments (original input), All Issues, PreTransit, Stalled,
-        # Processed, and Marker sheets. PreTransit / Stalled / All Issues are
-        # always created (may be empty).
-        # (df_in is the original input rows as read from the workbook)
+        # ---- helpers ------------------------------------------------------------
+        def _clean_tn_value(v) -> str:
+            """Return a clean string tracking number (no decimals/scientific)."""
+            if v is None:
+                return ""
+            s = str(v).strip()
+            if s == "" or s.lower() in ("nan", "none"):
+                return ""
+            # common cases: 1.2345E+11, 123456789012.0, ints/floats
+            try:
+                # if it's numeric in any form, render as integer with no decimal
+                as_float = float(s.replace(",", ""))  # allow accidental commas
+                # guard against scientific strings like '1.234e+11' -> int ok
+                return str(int(as_float))
+            except Exception:
+                # not numeric -> keep as-is
+                # but if it's like '123456789012.0', strip trailing '.0'
+                if s.endswith(".0"):
+                    return s[:-2]
+                return s
+
+        def _format_tracking_number_col(df: pd.DataFrame) -> pd.DataFrame:
+            if "Tracking Number" not in df.columns:
+                return df
+            out = df.copy()
+            out["Tracking Number"] = (
+                out["Tracking Number"]
+                .astype("object")  # don't let pandas coerce back to numeric
+                .map(_clean_tn_value)
+            )
+            return out
+
+        def _ensure_column_after(df: pd.DataFrame, col: str, after_col: str, default_value=0) -> pd.DataFrame:
+            out = df.copy()
+            if col not in out.columns:
+                out[col] = default_value
+            if after_col in out.columns:
+                cols = list(out.columns)
+                if col in cols:
+                    cols.remove(col)
+                insert_at = cols.index(after_col) + 1
+                cols.insert(insert_at, col)
+                out = out[cols]
+            return out
+
+        def _finalize(df: pd.DataFrame) -> pd.DataFrame:
+            out = _format_tracking_number_col(df)
+            if "Damaged" in out.columns:
+                out = _ensure_column_after(
+                    out, "UnableToDeliver", "Damaged", default_value=0)
+            return out
+
+        # ---- derive views -------------------------------------------------------
         if "IsPreTransit" in df_out.columns:
             pretransit = df_out[df_out["IsPreTransit"] == True]
         else:
-            # Create an empty frame with the same columns as df_out
             pretransit = pd.DataFrame(columns=df_out.columns)
 
-        # Stalled records: IsStalled == 1
         if "IsStalled" in df_out.columns:
             stalled = df_out[df_out["IsStalled"] == 1]
         else:
             stalled = pd.DataFrame(columns=df_out.columns)
 
-        # Damaged or Returned records:
-        # include any TN with Damaged == 1 or IsRTS == 1
         if "Damaged" in df_out.columns or "IsRTS" in df_out.columns:
             damaged_or_returned = df_out[
                 ((df_out["Damaged"] == 1)
@@ -244,9 +289,6 @@ class WorkbookProcessor:
         else:
             damaged_or_returned = pd.DataFrame(columns=df_out.columns)
 
-        # All Issues: TNs that are NOT delivered (IsDelivered != 1). If
-        # IsDelivered is not present, fall back to the previous heuristic
-        # (HasException OR IsStalled OR IsRTS).
         if "IsDelivered" in df_out.columns:
             try:
                 all_issues = df_out[df_out["IsDelivered"] != 1]
@@ -259,7 +301,6 @@ class WorkbookProcessor:
                                                                                                   False] * len(df_out))
             is_rts = df_out["IsRTS"] == 1 if "IsRTS" in df_out.columns else pd.Series([
                                                                                       False] * len(df_out))
-
             try:
                 issues_mask = (has_exc | is_stalled | is_rts)
                 issues_mask.index = df_out.index
@@ -267,46 +308,59 @@ class WorkbookProcessor:
             except Exception:
                 all_issues = pd.DataFrame(columns=df_out.columns)
 
-        # openpyxl sometimes emits a "Workbook contains no default style" warning
-        # when saving workbooks created without explicit styles. Suppress here.
+        # finalize frames
+        df_in_w = _finalize(df_in)
+        all_issues_w = _finalize(all_issues)
+        pretransit_w = _finalize(pretransit)
+        stalled_w = _finalize(stalled)
+        damaged_or_returned_w = _finalize(damaged_or_returned)
+
+        # ---- write --------------------------------------------------------------
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with pd.ExcelWriter(processed_path, engine="openpyxl", mode="w") as xw:
-                # 1) All Shipments (original input)
                 try:
-                    df_in.to_excel(xw, sheet_name="All Shipments",
-                                   index=False, na_rep="")
+                    df_in_w.to_excel(
+                        xw, sheet_name="All Shipments", index=False, na_rep="")
                 except Exception:
-                    # If df_in is malformed, write an empty frame instead.
                     pd.DataFrame().to_excel(xw, sheet_name="All Shipments", index=False, na_rep="")
 
-                # 2) All Issues (may be empty)
-                all_issues.to_excel(
+                all_issues_w.to_excel(
                     xw, sheet_name="All Issues", index=False, na_rep="")
-
-                # 3) PreTransit (always present)
-                pretransit.to_excel(
+                pretransit_w.to_excel(
                     xw, sheet_name="PreTransit", index=False, na_rep="")
-
-                # 4) Stalled (always present)
-                stalled.to_excel(xw, sheet_name="Stalled",
-                                 index=False, na_rep="")
-
-                # 5) Damaged or Returned — appears after Stalled
-                damaged_or_returned.to_excel(
-                    xw, sheet_name="Damaged or Returned", index=False, na_rep=""
-                )
-
-                # 6) Marker
-                # Intentionally do NOT write a 'Processed' sheet to avoid
-                # duplication with 'All Issues' and reduce workbook size.
+                stalled_w.to_excel(xw, sheet_name="Stalled",
+                                   index=False, na_rep="")
+                damaged_or_returned_w.to_excel(
+                    xw, sheet_name="Damaged or Returned", index=False, na_rep="")
                 marker.to_excel(xw, sheet_name="Marker", index=False)
 
-        # # UnableToDeliver records: UnableToDeliver == 1
-        # if "UnableToDeliver" in df_out.columns:
-        #     unableToDeliver = df_out[df_out["UnableToDeliver"] == 1]
-        # else:
-        #     unableToDeliver = pd.DataFrame(columns=df_out.columns)
+        # ---- force Excel TEXT type for "Tracking Number" ------------------------
+        try:
+            wb = load_workbook(processed_path)
+            for sheet_name in ["All Shipments", "All Issues", "PreTransit", "Stalled", "Damaged or Returned"]:
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
+                if ws.max_row < 1:
+                    continue
+                # find TN column by header
+                tn_col_idx = None
+                for col_idx, cell in enumerate(ws[1], start=1):
+                    if (cell.value or "").strip() == "Tracking Number":
+                        tn_col_idx = col_idx
+                        break
+                if tn_col_idx is None:
+                    continue
+                # coerce every TN cell to string and set number format to text
+                for r in range(2, ws.max_row + 1):
+                    c = ws.cell(row=r, column=tn_col_idx)
+                    c.value = _clean_tn_value(c.value)
+                    c.number_format = "@"  # Excel 'Text' format
+            wb.save(processed_path)
+        except Exception:
+            # non-fatal if anything goes sideways here
+            pass
 
     def _postprocess_workbook(self, processed_path: Path) -> None:
         try:
