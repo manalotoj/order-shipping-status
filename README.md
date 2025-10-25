@@ -196,6 +196,33 @@ This project processes an input Excel workbook of shipment rows and enriches eac
   - When using `--replay-dir`, the CLI uses `ReplayClient` and `normalize_fedex` to load carrier responses from disk — this mode is deterministic and recommended for CI and regression testing.
   - If `--use-api` is set, the CLI will attempt to construct a `FedExClient` using environment variables (see `src/order_shipping_status/config/env.py`), and will make real HTTP calls via `RequestsTransport`.
 
+  ## Example: generate a combined JSON dump and replay it
+
+  A common developer workflow is to (A) call the live API once to collect raw responses into a combined JSON dump, then (B) run deterministic replay runs from that dump.
+
+  1) Generate the combined dump (writes `<input-stem>-json-bodies.json` next to the workbook). This requires valid FedEx credentials in your environment or a `.env` you load into the shell:
+
+  ```bash
+  PYTHONPATH=src python -m order_shipping_status.cli \
+    tests/data/RAW_TransitIssues_10-20-2025.xlsx \
+    --use-api --dump-api-bodies --reference-date 2025-10-22 --no-console
+  ```
+
+  After this run you should see a file named `tests/data/RAW_TransitIssues_10-20-2025-json-bodies.json` containing an array of raw API bodies.
+
+  2) Replay deterministically using the generated dump (no network calls):
+
+  ```bash
+  PYTHONPATH=src python -m order_shipping_status.cli \
+    tests/data/RAW_TransitIssues_10-20-2025.xlsx \
+    --replay-dir tests/data/RAW_TransitIssues_10-20-2025-json-bodies.json \
+    --reference-date 2025-10-22 --no-console
+  ```
+
+  Notes:
+  - The `--dump-api-bodies` flag appends raw responses to the computed `<input-stem>-json-bodies.json` path; multiple runs will append to the same file (use a fresh copy if you want a reproducible snapshot).
+  - Replay runs do not require credentials and are safe to run in CI.
+
 
   ## Column Contract (key outputs)
 
