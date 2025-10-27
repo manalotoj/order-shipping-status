@@ -1,22 +1,16 @@
 # Order Shipping Status — Overview & Replay Guide
 
-This document summarizes what the system does today, how replay works (with or without an input file), and how the pipeline is designed and implemented — updated to reflect the latest working code and tests.
-
-
-## What the System Does
-
 This project processes an input Excel workbook of shipment rows and enriches each row with carrier-derived status and metrics. For each Tracking Number the pipeline either replays a recorded carrier response (from a combined JSON dump) or calls the live FedEx API, normalizes the response, and merges canonical fields into the row. The pipeline computes timing metrics (LatestEventTimestampUtc, DaysSinceLatestEvent), derives indicator flags (IsPreTransit, IsDelivered, HasException, IsRTS, IsStalled), and composes a human-friendly CalculatedStatus and CalculatedReasons. The final artifact is a stable, processed workbook (xlsx) suitable for downstream reporting and deterministic CI/regression testing.
-
-   # Order Shipping Status — Overview & Replay Guide
-
-  This document summarizes what the system does today, how replay works (with or without an input file), and how the pipeline is designed and implemented — updated to reflect the latest working code and tests.
 
   ## Supported Modes
 
   ### Normal mode (with input file)
     - `Tracking Number`
     - `Carrier Code` (e.g., `FDX`)
-    - Optionally `Promised Delivery Date`, `Delivery Tracking Status`, etc.
+    - Optionally 
+    - `Promised Delivery Date`
+    - `Delivery Tracking Status`
+    - etc.
 
   ### Replay mode (with or without input file)
     - A **flat** minimal body: `{"code": "...","statusByLocale": "...","description": "..."}`; or
